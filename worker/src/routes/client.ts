@@ -558,7 +558,11 @@ async function recordIpChangeIfEnabled(database: db.QueryDatabase, clientName: s
   const notification = buildIpChangeNotification({ nodeName: clientName, parts });
   const adminSettings = buildAdminSettings(settings);
   await dispatchNotification(database, adminSettings, notification, {
-    deps: { recordHealth: bestEffortRecordHealthEvent },
+    deps: {
+      recordHealth: bestEffortRecordHealthEvent,
+      // F8 · agent-mail 中继：入队待投递
+      enqueueRelay: (item) => db.enqueueNotification(database, item),
+    },
   });
 
   await db.insertAuditLog(database, 'system', 'ip_change',

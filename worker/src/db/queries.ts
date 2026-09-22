@@ -377,6 +377,61 @@ export async function markWebsiteMonitorNotified(database: QueryDatabase, id: nu
   return sba.markSupabaseWebsiteMonitorNotified(database.env, id, time);
 }
 
+// ---------------------------------------------------------------------------
+// CF 资产 / 域名（F1/F3）
+export async function listCfDomains(database: QueryDatabase): Promise<t.CfDomain[]> {
+  return sba.getSupabaseCfDomains(database.env);
+}
+
+export async function listCfSyncRuns(database: QueryDatabase): Promise<t.CfSyncRun[]> {
+  return sba.getSupabaseCfSyncRuns(database.env);
+}
+
+// 单事务同步 CF 域名（upsert 输入集 + 删除旧行），对应 cfm_sync_cf_domains。
+export async function syncCfDomains(database: QueryDatabase, rows: t.CfDomainInput[]): Promise<void> {
+  return sba.syncSupabaseCfDomains(database.env, rows);
+}
+
+export async function insertCfSyncRun(database: QueryDatabase, run: t.CfSyncRunInput): Promise<number> {
+  return sba.insertSupabaseCfSyncRun(database.env, run);
+}
+
+// ---------------------------------------------------------------------------
+// F4 · SLA 月报 / F6 · 多区域共识
+export async function getSlaReport(database: QueryDatabase, month: string | null): Promise<t.SlaReportRow[]> {
+  return sba.getSupabaseSlaReport(database.env, month);
+}
+
+export async function getWebsiteConsensus(
+  database: QueryDatabase,
+  monitorId: number,
+  windowMinutes: number
+): Promise<Record<string, unknown>> {
+  return sba.getSupabaseWebsiteConsensus(database.env, monitorId, windowMinutes);
+}
+
+// ---------------------------------------------------------------------------
+// F8 · agent-mail 中继投递队列
+export async function listPendingNotifications(database: QueryDatabase, limit: number): Promise<t.NotificationQueueItem[]> {
+  return sba.listSupabaseNotificationPending(database.env, limit);
+}
+
+export async function listNotificationQueue(database: QueryDatabase, limit: number): Promise<t.NotificationQueueItem[]> {
+  return sba.listSupabaseNotificationQueue(database.env, limit);
+}
+
+export async function enqueueNotification(database: QueryDatabase, item: t.NotificationQueueInput): Promise<number> {
+  return sba.enqueueSupabaseNotification(database.env, item);
+}
+
+export async function ackNotifications(database: QueryDatabase, ids: number[]): Promise<number> {
+  return sba.ackSupabaseNotifications(database.env, ids);
+}
+
+export async function expireNotifications(database: QueryDatabase, hours: number): Promise<number> {
+  return sba.expireSupabaseNotifications(database.env, hours);
+}
+
 export async function insertRecord(database: QueryDatabase, record: t.MonitorRecord): Promise<void> {
   return sba.insertSupabaseMonitorRecord(database.env, record);
 }

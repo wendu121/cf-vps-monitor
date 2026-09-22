@@ -3119,7 +3119,11 @@ adminRoutes.post('/test/sendMessage', async (c) => {
     }, {
       channel: selectedChannel,
       auditUser: c.get('username') || 'system',
-      deps: { recordHealth: bestEffortRecordHealthEvent },
+      deps: {
+        recordHealth: bestEffortRecordHealthEvent,
+        // F8 · agent-mail 中继：测试通知同样入队，便于验证拉取链路
+        enqueueRelay: (item) => db.enqueueNotification(database, item),
+      },
     });
     if (!sent) {
       return c.json({

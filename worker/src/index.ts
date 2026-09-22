@@ -11,6 +11,8 @@ import { shortGitSha } from './utils/update-check';
 // 路由模块
 import { publicRoutes } from './routes/public';
 import { adminRoutes } from './routes/admin';
+import { cfRoutes } from './routes/cf';
+import { opsRoutes } from './routes/ops';
 import { adminThemeRoutes, publicThemeRoutes } from './routes/theme';
 import { clientRoutes } from './routes/client';
 import { wsRoutes } from './routes/websocket';
@@ -25,6 +27,8 @@ import { getAdminSessionToken, getMfaStepUpToken, verifyAdminCsrfToken } from '.
 import { buildAdminSettings } from './settings/schema';
 import { bestEffortRecordHealthEvent, errorDetail } from './utils/observability';
 import { NOTIFICATION_DISPATCH_SETTING_KEYS, dispatchNotification } from './utils/notification-dispatch';
+import { CloudflareApi, resolveCfCredentials } from './utils/cf-client';
+import { syncCfAssets } from './utils/cf-sync';
 import { clearScheduledDatabaseStartupFailure, recordScheduledDatabaseStartupFailure } from './utils/scheduled-observability';
 import { sanitizeSetupDiagnosticDetail } from './utils/setup-diagnostics';
 import { getCloudflareClientIp } from './utils/request-ip';
@@ -392,6 +396,8 @@ app.use('/api/admin/*', async (c, next): Promise<Response | undefined> => {
 });
 
 app.route('/api/admin/themes', adminThemeRoutes);
+app.route('/api/admin/cf', cfRoutes);
+app.route('/api/admin/ops', opsRoutes);
 app.route('/api/admin', adminRoutes);
 
 // 管理员手动触发维护任务，用于本地开发和部署后自检。
@@ -439,6 +445,7 @@ const SCHEDULED_SETTING_KEYS = [
 ];
 
 interface ScheduledRunContext {
+  env: Bindings;
   database: db.QueryDatabase;
   getSettings(): Promise<ScheduledSettings>;
   getAdminSettings(): Promise<ScheduledAdminSettings>;
@@ -463,6 +470,7 @@ export function createScheduledRunContext(env: Bindings): ScheduledRunContext {
   const clientsByIdsPromises = new Map<string, Promise<ScheduledMonitorClient[]>>();
 
   return {
+    env,
     database,
     getSettings() {
       settingsPromise ||= db.getSettingsByKeys(database, SCHEDULED_SETTING_KEYS, true);
@@ -499,7 +507,11 @@ export function createScheduledRunContext(env: Bindings): ScheduledRunContext {
 async function sendNotification(context: ScheduledRunContext, notification: NotificationMessage): Promise<boolean> {
   const settings = await context.getAdminSettings();
   return dispatchNotification(context.database, settings, notification, {
-    deps: { recordHealth: bestEffortRecordHealthEvent },
+    deps: {
+      recordHealth: bestEffortRecordHealthEvent,
+      // F8 · agent-mail 中继：即时发送的同时入队，供 WorkBuddy 自动化拉取发邮件。
+      enqueueRelay: (item) => db.enqueueNotification(context.database, item),
+    },
   });
 }
 
@@ -830,6 +842,43 @@ async function runScheduled(env: Bindings): Promise<void> {
   await runScheduledStep(context, 'cron_offline', 'cron_offline_error', '离线告警检查', () => runOfflineCheck(context, now));
   await runScheduledStep(context, 'cron_expiry', 'cron_expiry_error', '到期提醒检查', () => runExpiryCheck(context, now));
   await runScheduledStep(context, 'cron_website', 'cron_website_error', '网站监控检查', () => runWebsiteMonitorChecks(context, now));
+  await runScheduledStep(context, 'cron_cf_sync', 'cron_cf_sync_error', 'CF 资产同步', () => runCfAssetSync(context));
+  await runScheduledStep(context, 'cron_notify_expire', 'cron_notify_expire_error', '通知队列超时清理', () => runNotificationExpire(context));
+}
+
+/**
+ * F1/F3 · CF 资产与域名同步（Cron）。
+ * 节流：默认每 30 分钟一次（cf_sync_interval_min 可调，0 表示关闭），
+ * 依据 cf_sync_runs 最近一次成功记录判断；未配置 CF 凭据时静默跳过（不报错刷屏）。
+ */
+async function runCfAssetSync(context: ScheduledRunContext): Promise<void> {
+  const settings = await context.getAdminSettings();
+  const intervalMin = Number(settings['cf_sync_interval_min'] ?? 30);
+  if (!Number.isFinite(intervalMin) || intervalMin <= 0) return;
+
+  const creds = resolveCfCredentials(context.env, settings);
+  if (!creds) return;
+
+  const runs = await db.listCfSyncRuns(context.database);
+  const last = runs.find(r => !r.error);
+  if (last) {
+    const elapsedMin = (Date.now() - Date.parse(last.ran_at)) / 60000;
+    if (Number.isFinite(elapsedMin) && elapsedMin < intervalMin) return;
+  }
+
+  const summary = await syncCfAssets(context.database, new CloudflareApi(creds));
+  await db.insertCfSyncRun(context.database, {
+    kind: 'domains',
+    new_count: summary.domains,
+    skipped_count: 0,
+    error: null,
+  });
+}
+
+/** F8 · 通知队列兜底：超过 24 小时未 ack 的自动标记已投递，防止无限堆积。 */
+async function runNotificationExpire(context: ScheduledRunContext): Promise<void> {
+  const hours = Number((await context.getAdminSettings())['agent_mail_expire_hours'] ?? 24);
+  await db.expireNotifications(context.database, Number.isFinite(hours) && hours > 0 ? hours : 24);
 }
 
 export default {

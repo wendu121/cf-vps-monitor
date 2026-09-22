@@ -5,6 +5,10 @@ import {
   Bell,
   Bolt,
   CalendarClock,
+  Cloud,
+  BarChart3,
+  Stethoscope,
+  Mail,
   Ellipsis,
   Globe,
   Globe2,
@@ -28,6 +32,11 @@ export interface AdminMenuItem {
 export const adminMenuItems: AdminMenuItem[] = [
   { path: '/admin', label: '服务器', icon: <Server size={18} /> },
   { path: '/admin/websites', label: '网站', icon: <Globe2 size={18} /> },
+  { path: '/admin/cf', label: 'CF 资产', icon: <Cloud size={18} /> },
+  { path: '/admin/sla', label: 'SLA 月报', icon: <BarChart3 size={18} /> },
+  { path: '/admin/diagnose', label: '深度诊断', icon: <Stethoscope size={18} /> },
+  { path: '/admin/agent-mail', label: 'agent-mail 中继', icon: <Mail size={18} /> },
+  { path: '/status', label: '公开状态页', icon: <Activity size={18} /> },
   {
     path: '/admin/settings',
     label: '系统设置',
@@ -132,6 +141,10 @@ export function getAdminSectionTitle(pathname: string) {
   if (pathname.startsWith('/admin/ping')) return '延迟监测';
   if (pathname.startsWith('/admin/themes')) return '主题管理';
   if (pathname.startsWith('/admin/websites')) return '网站';
+  if (pathname.startsWith('/admin/cf')) return 'CF 资产';
+  if (pathname.startsWith('/admin/sla')) return 'SLA 月报';
+  if (pathname.startsWith('/admin/diagnose')) return '深度诊断';
+  if (pathname.startsWith('/admin/agent-mail')) return 'agent-mail 中继';
   if (pathname.startsWith('/admin/logs')) return '审计日志';
   if (pathname.startsWith('/admin/account')) return '账户设置';
   if (pathname.startsWith('/admin/about')) return '关于';

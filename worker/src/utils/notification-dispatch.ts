@@ -27,6 +27,8 @@ export const NOTIFICATION_DISPATCH_SETTING_KEYS = [
   'webhook_username',
   'webhook_password',
   'webhook_retry_count',
+  /** F8：设为 'false' 可关闭 agent-mail 中继入队（默认开启） */
+  'agent_mail_relay',
 ] as const;
 
 type HealthStatus = 'ok' | 'warning' | 'error' | 'disabled';
@@ -55,6 +57,16 @@ type DispatchDependencies = {
   sendEmail?: EmailSender;
   sendWebhook?: WebhookSender;
   recordHealth?: RecordHealth;
+  /**
+   * F8 · agent-mail 中继入队钩子（依赖注入，避免本模块运行时依赖 db 造成循环导入）。
+   * 由调用方注入 `(item) => db.enqueueNotification(database, item)`。
+   */
+  enqueueRelay?: (item: {
+    channel: 'agent_mail';
+    subject: string;
+    body: string;
+    payload: Record<string, unknown> | null;
+  }) => Promise<unknown>;
 };
 
 type DispatchOptions = {
@@ -208,6 +220,35 @@ async function dispatchWebhook(
   return false;
 }
 
+/**
+ * F8 · agent-mail 中继：即时通道（Telegram/Email/Webhook）照常发送的同时，
+ * 往 notification_queue 写一条 `agent_mail` 待投递记录，供 WorkBuddy 自动化
+ * 经 /api/admin/ops/notifications/pending 拉取并用 agent-mail 发邮件。
+ * - 仅在注入了 enqueueRelay 且设置项 `agent_mail_relay` 不为 'false' 时启用。
+ * - best-effort：入队失败不影响主投递结果，只留痕。
+ */
+async function enqueueAgentMailRelay(
+  database: db.QueryDatabase | undefined,
+  settings: NotificationSettings,
+  notification: NotificationMessage,
+  deps: DispatchDependencies,
+): Promise<void> {
+  if (!database || !deps.enqueueRelay) return;
+  if (settings.agent_mail_relay === 'false') return;
+  try {
+    await deps.enqueueRelay({
+      channel: 'agent_mail',
+      subject: notification.subject,
+      body: notification.body,
+      payload: { ...(notification as unknown as Record<string, unknown>) },
+    });
+  } catch (error) {
+    await record(deps, database, 'agent_mail_relay', 'error', `enqueue failed: ${errorDetail(error)}`, {
+      auditAction: 'agent_mail_relay_enqueue_error',
+    });
+  }
+}
+
 export async function dispatchNotification(
   database: db.QueryDatabase | undefined,
   settings: NotificationSettings,
@@ -216,16 +257,21 @@ export async function dispatchNotification(
 ): Promise<boolean> {
   const deps = options.deps || {};
   const channel = options.channel || settings.notification_method || 'telegram';
+  let sent = false;
   switch (channel) {
     case 'none':
       await record(deps, database, 'notification', 'disabled', 'notification_method is none');
       return false;
     case 'email':
-      return dispatchEmail(database, settings, notification, deps, options.auditUser);
+      sent = await dispatchEmail(database, settings, notification, deps, options.auditUser);
+      break;
     case 'webhook':
-      return dispatchWebhook(database, settings, notification, deps, options.auditUser);
+      sent = await dispatchWebhook(database, settings, notification, deps, options.auditUser);
+      break;
     case 'telegram':
     default:
-      return dispatchTelegram(database, settings, notification, deps, options.auditUser);
+      sent = await dispatchTelegram(database, settings, notification, deps, options.auditUser);
   }
+  await enqueueAgentMailRelay(database, settings, notification, deps);
+  return sent;
 }

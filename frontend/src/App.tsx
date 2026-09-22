@@ -32,6 +32,11 @@ const AdminLayout = lazy(() => import('./pages/admin/AdminLayout'));
 const AdminDashboard = lazy(loadAdminDashboard);
 const AdminClients = lazy(loadAdminClients);
 const AdminWebsites = lazy(() => import('./pages/admin/Websites'));
+const AdminCFAssets = lazy(() => import('./pages/admin/CFAssets'));
+const AdminSLA = lazy(() => import('./pages/admin/SLA'));
+const AdminDiagnose = lazy(() => import('./pages/admin/Diagnose'));
+const AdminAgentMail = lazy(() => import('./pages/admin/AgentMail'));
+const StatusPage = lazy(() => import('./pages/StatusPage'));
 const SettingsLayout = lazy(loadSettingsLayout);
 const SettingsSite = lazy(loadSettingsSite);
 const SettingsGeneral = lazy(loadSettingsGeneral);
@@ -128,6 +133,8 @@ export default function App() {
                   <Route path="instance/:uuid" element={<LiveDataRoute><Instance /></LiveDataRoute>} />
                 </Route>
 
+                <Route path="/status" element={<StatusPage />} />
+
                 <Route path="/login" element={<Login />} />
                 <Route path="/admin/login" element={<Login />} />
                 <Route path="/db-init" element={<DbInit />} />
@@ -136,6 +143,10 @@ export default function App() {
                   <Route index element={<LiveDataRoute><AdminDashboard /></LiveDataRoute>} />
                   <Route path="clients" element={<AdminClients />} />
                   <Route path="websites" element={<AdminWebsites />} />
+                  <Route path="cf" element={<AdminCFAssets />} />
+                  <Route path="sla" element={<AdminSLA />} />
+                  <Route path="diagnose" element={<AdminDiagnose />} />
+                  <Route path="agent-mail" element={<AdminAgentMail />} />
                   <Route path="settings" element={<SettingsLayout />}>
                     <Route index element={<SettingsSite />} />
                     <Route path="site" element={<SettingsSite />} />

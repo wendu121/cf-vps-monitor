@@ -402,3 +402,94 @@ export interface BoundedTableRowCounts {
   capped: Partial<Record<keyof TableRowCounts, boolean>>;
   limit: number;
 }
+
+// ---------------------------------------------------------------------------
+// CF 资产 / 域名（F1/F3，对应迁移 6 的 cf_domains / cf_sync_runs 表）
+export type CfDomainProjectType = 'worker' | 'pages';
+
+export interface CfDomain {
+  id: number;
+  project_name: string;
+  project_type: CfDomainProjectType;
+  domain: string;
+  zone_id: string | null;
+  ssl_days_left: number | null;
+  synced_at: string;
+}
+
+export interface CfDomainInput {
+  project_name: string;
+  project_type: CfDomainProjectType;
+  domain: string;
+  zone_id?: string | null;
+  ssl_days_left?: number | null;
+  synced_at?: string;
+}
+
+export type CfSyncRunKind = 'assets' | 'domains';
+
+export interface CfSyncRun {
+  id: number;
+  kind: CfSyncRunKind;
+  ran_at: string;
+  new_count: number;
+  skipped_count: number;
+  error: string | null;
+}
+
+export interface CfSyncRunInput {
+  kind: CfSyncRunKind;
+  new_count?: number;
+  skipped_count?: number;
+  error?: string | null;
+}
+
+export interface CfAssetsSnapshot {
+  configured: boolean;
+  zones: Array<{ id: string; name: string; status: string; paused: boolean }>;
+  workers: Array<{ id: string; name: string; url: string | null }>;
+  pages: Array<{ id: string; name: string; subdomain: string | null; url: string | null; domains: string[] }>;
+  noPermission?: boolean;
+  error?: string;
+}
+
+// ---------------------------------------------------------------------------
+// F4 · SLA 月报（cfm_website_sla_report）
+export interface SlaReportRow {
+  monitor_id: number;
+  name: string;
+  url: string;
+  interval_sec: number | null;
+  total_checks: number;
+  up_checks: number;
+  /** 可用率百分比（0-100，保留 3 位小数）；无检测记录时为 null */
+  sla_pct: number | null;
+  /** 估算不可用时长（分钟） */
+  downtime_min: number | null;
+  avg_latency_ms: number | null;
+  last_checked_at: string | null;
+}
+
+// ---------------------------------------------------------------------------
+// F8 · agent-mail 中继投递队列（notification_queue）
+export type NotificationChannel = 'telegram' | 'email' | 'webhook' | 'agent_mail';
+
+export interface NotificationQueueItem {
+  id: number;
+  channel: NotificationChannel;
+  subject: string;
+  body: string;
+  payload: Record<string, unknown> | null;
+  delivered: boolean;
+  delivered_at: string | null;
+  attempts: number;
+  last_error: string | null;
+  created_at: string;
+}
+
+export interface NotificationQueueInput {
+  channel?: NotificationChannel;
+  subject: string;
+  body: string;
+  payload?: Record<string, unknown> | null;
+}

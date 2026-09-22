@@ -1,5 +1,6 @@
 import type { AuditLogsPage, BoundedTableRowCounts, ClearAllRecordsResult, Client, ClientCapacityCounts, ClientIdentity, ClientReferenceCleanupResult, ClientTokenMeta, ClientVisibility, DeleteClientsResult, DeleteOldRowsOptions, ExpiryNotification, ExpiryNotificationUpdate, GPUHistoryRecord, GPUInfo, HistoryTableRowCounts, LoadMetricWindowStats, LoadNotification, LoadNotificationInput, LoadNotificationMetric, LoginRateLimit, MonitorRecord, OfflineNotification, OfflineNotificationUpdate, OrphanClientDataCleanupResult, PingHistoryRecord, PingSnapshotInput, PingTask, PingTaskEstimateRow, PingTaskHistoryRequest, PublicClientRow, PublicWebsiteMonitor, ScheduledClientRow, TableRowCounts, Theme, ThemeAsset, ThemeAssetUpsertInput, ThemeUpsertInput, User, WebsiteCheck, WebsiteCheckInput, WebsiteMonitor, WebsiteMonitorInput } from '../types.ts';
 import type { BackupData } from '../../utils/backup.ts';
+import type { CfDomain, CfDomainInput, CfSyncRun, CfSyncRunInput, NotificationQueueInput, NotificationQueueItem, SlaReportRow } from '../types.ts';
 import { redactDatabaseSecrets } from '../../utils/setup-diagnostics.ts';
 import { generateAgentToken, hashAgentToken } from '../../utils/client.ts';
 
@@ -866,6 +867,66 @@ export function setSupabaseWebsiteMonitorEnabled(env: SupabaseApiEnv, id: number
     input_id: id,
     input_enabled: enabled,
   });
+}
+
+// ---------------------------------------------------------------------------
+// CF 资产 / 域名（F1/F3，对应迁移 6 的 RPC）
+export function getSupabaseCfDomains(env: SupabaseApiEnv): Promise<CfDomain[]> {
+  return callSupabaseRpc<CfDomain[]>(env, 'cfm_cf_domains');
+}
+
+export function getSupabaseCfSyncRuns(env: SupabaseApiEnv): Promise<CfSyncRun[]> {
+  return callSupabaseRpc<CfSyncRun[]>(env, 'cfm_cf_sync_runs');
+}
+
+// 单事务同步：upsert 输入集 + 删除不在输入集的旧行（对应 cfm_sync_cf_domains）。
+export function syncSupabaseCfDomains(env: SupabaseApiEnv, rows: CfDomainInput[]): Promise<void> {
+  return callSupabaseRpc<void>(env, 'cfm_sync_cf_domains', { input_rows: rows });
+}
+
+export function insertSupabaseCfSyncRun(env: SupabaseApiEnv, run: CfSyncRunInput): Promise<number> {
+  return callSupabaseRpc<number>(env, 'cfm_insert_cf_sync_run', { input_run: run });
+}
+
+// ---------------------------------------------------------------------------
+// F4 · SLA 月报 / F6 · 多区域共识
+export function getSupabaseSlaReport(env: SupabaseApiEnv, month: string | null): Promise<SlaReportRow[]> {
+  return callSupabaseRpc<SlaReportRow[]>(env, 'cfm_website_sla_report', { input: { month } });
+}
+
+export function getSupabaseWebsiteConsensus(
+  env: SupabaseApiEnv,
+  monitorId: number,
+  windowMinutes: number
+): Promise<Record<string, unknown>> {
+  return callSupabaseRpc<Record<string, unknown>>(env, 'cfm_website_consensus', {
+    input: { monitor_id: monitorId, window_minutes: windowMinutes },
+  });
+}
+
+// ---------------------------------------------------------------------------
+// F8 · agent-mail 中继投递队列
+export function listSupabaseNotificationPending(env: SupabaseApiEnv, limit: number): Promise<NotificationQueueItem[]> {
+  return callSupabaseRpc<NotificationQueueItem[]>(env, 'cfm_notification_pending', { input: { limit } });
+}
+
+export function listSupabaseNotificationQueue(env: SupabaseApiEnv, limit: number): Promise<NotificationQueueItem[]> {
+  return callSupabaseRpc<NotificationQueueItem[]>(env, 'cfm_notification_queue', { input: { limit } });
+}
+
+export function enqueueSupabaseNotification(
+  env: SupabaseApiEnv,
+  item: NotificationQueueInput
+): Promise<number> {
+  return callSupabaseRpc<number>(env, 'cfm_enqueue_notification', { input: item });
+}
+
+export function ackSupabaseNotifications(env: SupabaseApiEnv, ids: number[]): Promise<number> {
+  return callSupabaseRpc<number>(env, 'cfm_ack_notifications', { input: { ids } });
+}
+
+export function expireSupabaseNotifications(env: SupabaseApiEnv, hours: number): Promise<number> {
+  return callSupabaseRpc<number>(env, 'cfm_expire_notifications', { input: { hours } });
 }
 
 export function getSupabaseLoginUser(env: SupabaseApiEnv, username: string): Promise<User | null> {

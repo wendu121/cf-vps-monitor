@@ -1639,6 +1639,49 @@ publicRoutes.get('/websites', async (c) => {
   return response;
 });
 
+// F7 · 公开状态页：GET /api/public/status（免鉴权）
+// 注意：publicRoutes 挂载于 /api（index.ts），故此处必须写 '/public/status'，
+//       写成 '/status' 会变成 /api/status（与前端/文档不一致 → 404）。
+publicRoutes.get('/public/status', async (c) => {
+  const fresh = isFreshPublicMetadataRequest(c);
+  const includeHidden = c.req.query('include_hidden') === '1' && await hasAdminSession(c);
+  const cached = !fresh && !includeHidden ? await getCachedPublicMetadataResponse(c, 'status') : null;
+  if (cached) return cached;
+  const limited = await guardPublicMetadata(c, 'status');
+  if (limited) return limited;
+  const database = getDatabase(c.env);
+  const periodHours = readIntParam(c.req.query('hours'), 24, 72);
+  const monitors = await db.listPublicWebsiteMonitors(database, 120, fresh, periodHours, includeHidden);
+  const sites = monitors.map((m) => {
+    const total = m.checks.length;
+    const up = m.checks.filter((check) => check.ok).length;
+    return {
+      id: m.id,
+      name: m.name,
+      url: m.url,
+      method: m.method,
+      status: m.status,
+      last_checked_at: m.last_checked_at,
+      last_status_code: m.last_status_code,
+      last_latency_ms: m.last_latency_ms,
+      uptime_pct: total > 0 ? Math.round((up / total) * 1000) / 10 : null,
+      checks_count: total,
+    };
+  });
+  const operational = sites.filter((s) => s.status === 'up').length;
+  const degraded = sites.length - operational;
+  const payload = {
+    generated_at: new Date().toISOString(),
+    period_hours: periodHours,
+    total: sites.length,
+    operational,
+    degraded,
+    overall: degraded === 0 ? 'operational' : operational === 0 ? 'major_outage' : 'partial_outage',
+    sites,
+  };
+  return includeHidden ? privateJsonResponse(payload) : setPublicMetadataResponse(c, payload, !fresh);
+});
+
 publicRoutes.get('/websites/:id/checks', async (c) => {
   const id = Number(c.req.param('id'));
   if (!Number.isInteger(id) || id <= 0) return c.json({ error: 'Not Found' }, 404);
