@@ -241,7 +241,11 @@ export class CloudflareApi {
     }
     // 2) Pages 自定义域名（按项目名聚合）
     try {
-      const j = await this.cfFetch(`/accounts/${this.accountId}/pages/projects?per_page=100`);
+      // ⚠️ Pages list 不支持任何分页参数：带 `per_page` 会返回 HTTP 400
+      // code 8000024（与上方 listPages 同一约束）。此前这里误传了
+      // `?per_page=100`，400 又被下面的 catch 吞掉，导致 Pages 自定义域名
+      // 整块静默丢失（cf_domains 只剩 worker 的行）。切勿再加回。
+      const j = await this.cfFetch(`/accounts/${this.accountId}/pages/projects`);
       for (const p of j.result || []) {
         try {
           const pd = await this.cfFetch(
@@ -252,12 +256,14 @@ export class CloudflareApi {
             status: x.status,
           }));
           if (ds.length) out.pages[p.name] = ds;
-        } catch {
-          /* 单个项目失败不影响其他 */
+        } catch (e) {
+          // 不静默：单个项目失败仍需留痕，否则会再次掩盖整块缺失。
+          console.warn(`[cf] pages domains for "${p.name}" failed: ${String((e as Error)?.message || e)}`);
         }
       }
-    } catch {
-      /* 权限不足或接口异常则忽略 */
+    } catch (e) {
+      // 不静默：此处曾吞掉 400，使 Pages 域名整块缺失而无人察觉。
+      console.warn(`[cf] pages projects list failed: ${String((e as Error)?.message || e)}`);
     }
     return out;
   }
