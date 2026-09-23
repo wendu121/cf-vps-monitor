@@ -335,6 +335,9 @@ export default function AdminLayout() {
         }
         .admin-main-content {
           position: relative;
+          /* F5/P1：为右上角四个悬浮快捷按钮预留专属一行，
+             否则它们会绝对定位压住各页面标题栏右端的按钮（实测于 SLA 页「上月/下月/刷新/导出」）。 */
+          padding-top: 46px;
         }
         .admin-top-actions {
           position: absolute;

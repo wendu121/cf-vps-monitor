@@ -41,15 +41,19 @@ export default function AdminSLA() {
   const [month, setMonth] = useState(currentMonth());
   const [rows, setRows] = useState<SlaRow[]>([]);
   const [loading, setLoading] = useState(true);
+  const [errorState, setErrorState] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
+    setErrorState(null);
     try {
-      const res = await apiFetch(`/admin/ops/sla?month=${month}`).catch(() => null);
+      const res = await apiFetch(`/admin/ops/sla?month=${month}`);
       setRows((res as { rows?: SlaRow[] })?.rows ?? []);
     } catch (e) {
-      toast.error(`SLA 加载失败：${(e as Error).message}`);
+      const msg = e instanceof Error ? e.message : 'SLA 加载失败';
+      setErrorState(msg);
       setRows([]);
+      toast.error(`SLA 加载失败：${msg}`);
     } finally {
       setLoading(false);
     }
@@ -108,6 +112,21 @@ export default function AdminSLA() {
         </Flex>
       </Flex>
 
+      {errorState ? (
+        <Card mb="4" className="admin-sla-error-card">
+          <Flex direction="column" gap="2">
+            <Flex align="center" gap="2">
+              <Badge color="red">加载失败</Badge>
+              <Text size="2" weight="bold">SLA 月报数据获取异常</Text>
+            </Flex>
+            <Text size="2" color="gray">{errorState}</Text>
+            {(errorState.includes('22007') || errorState.includes('invalid input syntax for type date')) && (
+              <Text size="2" color="amber">检测到日期解析错误（22007）：通常因 SLA 报告迁移（to_date 月份参数修复）尚未部署到数据库。请部署迁移 7 / 8 后重试。</Text>
+            )}
+          </Flex>
+        </Card>
+      ) : (
+        <>
       <Grid columns={{ initial: '1', sm: '4' }} gap="3" mb="4">
         <Card>
           <Text size="1" color="gray">监控站点</Text>
@@ -158,7 +177,7 @@ export default function AdminSLA() {
             </Table.Row>
           </Table.Header>
           <Table.Body>
-            {rows.length === 0 && (
+            {rows.length === 0 && !errorState && (
               <Table.Row>
                 <Table.Cell colSpan={6}>
                   <Text size="2" color="gray">本月暂无检测记录。</Text>
@@ -186,6 +205,8 @@ export default function AdminSLA() {
           </Table.Body>
         </Table.Root>
       </Card>
+        </>
+      )}
     </Box>
   );
 }

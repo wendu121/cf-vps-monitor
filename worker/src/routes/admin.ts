@@ -35,6 +35,8 @@ import { EMAIL_MESSAGE_MAX_CHARS } from '../utils/email';
 import { WEBHOOK_MESSAGE_MAX_CHARS } from '../utils/webhook';
 import { sanitizeSetupDiagnosticDetail } from '../utils/setup-diagnostics';
 import { checkWebsiteMonitorHttp, validateWebsiteMonitorInput } from '../utils/website-monitor';
+import { CloudflareApi, resolveCfCredentials } from '../utils/cf-client';
+import { matchZoneId } from '../utils/cf-sync';
 import { readLiveSnapshot, readRateLimitResult } from '../utils/do-response';
 import { readJsonWithLimit, readRequestBytesWithLimit } from '../utils/request-body';
 import { bytesToBase64 } from '../utils/theme-package';
@@ -2016,6 +2018,145 @@ adminRoutes.post('/websites/add', async (c) => {
   } catch (error) {
     console.error('[admin] website add failed:', sanitizeSetupDiagnosticDetail(error));
     return c.json({ error: '添加失败' }, 500);
+  }
+});
+
+/**
+ * CF 资产一键导入网站监控（F5 / Task #12）。
+ *
+ * body: { urls?: string[]; dryRun?: boolean }
+ *   - dryRun 默认 true：仅返回候选预览（含已存在标记），不动库。
+ *   - 传入 urls 子集时只处理这些主机名；否则处理全部候选。
+ *
+ * 候选来源（与 CF 资产面板同源）：
+ *   Worker 自定义域名        → source='cf_worker'，cf_project_name=脚本名
+ *   Pages 自定义域名 + 默认域  → source='cf_pages'，cf_project_name=项目名
+ *   不含 zone 裸域名（无 DNS 记录易误报离线）。
+ *
+ * 落库复用 validateWebsiteMonitorInput + db.createWebsiteMonitor，
+ * 并携带 source / cf_zone_id / cf_project_name（迁移 8 已为 cfm_* RPC 加装这些列）。
+ */
+adminRoutes.post('/websites/import-from-cf', async (c) => {
+  try {
+    const parsed = await readAdminJsonObject(c);
+    if (!parsed.ok) return parsed.response;
+    const body = parsed.body as { urls?: unknown; dryRun?: unknown };
+    const dryRun = body.dryRun !== false; // 默认 true
+    const requested = Array.isArray(body.urls)
+      ? (body.urls as unknown[]).map((u) => String(u).trim()).filter(Boolean)
+      : null;
+
+    const database = getDatabase(c.env);
+    const settingsMap = await db.getSettingsByKeys(database, ['cf_api_token', 'cf_account_id']);
+    const creds = resolveCfCredentials(c.env, settingsMap);
+    if (!creds) {
+      return c.json({ configured: false, error: 'CF 凭据未配置（请在设置中填写 cf_api_token / cf_account_id，或本地 .dev.vars）' }, 200);
+    }
+    const api = new CloudflareApi(creds);
+
+    const [zones, workers, pages, customDomains] = await Promise.all([
+      api.listZones(),
+      api.listWorkers(),
+      api.listPages(),
+      api.getProjectCustomDomains(),
+    ]);
+    if (!zones.configured) {
+      return c.json({ configured: false, error: 'Cloudflare API 未配置或鉴权失败' }, 200);
+    }
+
+    interface Candidate { hostname: string; source: 'cf_worker' | 'cf_pages'; projectName: string; zoneId: string | null; }
+    const candidates: Candidate[] = [];
+    // Worker 自定义域名
+    for (const [script, ds] of Object.entries(customDomains.workers)) {
+      for (const d of ds) {
+        candidates.push({ hostname: d.hostname, source: 'cf_worker', projectName: script, zoneId: matchZoneId(d.hostname, zones.items) });
+      }
+    }
+    // Pages 自定义域名
+    for (const [project, ds] of Object.entries(customDomains.pages)) {
+      for (const d of ds) {
+        candidates.push({ hostname: d.hostname, source: 'cf_pages', projectName: project, zoneId: matchZoneId(d.hostname, zones.items) });
+      }
+    }
+    // Pages 默认域名（xxx.pages.dev）
+    for (const p of pages.items) {
+      if (p.subdomain) {
+        candidates.push({ hostname: p.subdomain, source: 'cf_pages', projectName: p.name, zoneId: matchZoneId(p.subdomain, zones.items) });
+      }
+    }
+
+    const normalizeUrl = (u: string) => u.trim().toLowerCase().replace(/\/+$/, '');
+    const existing = await db.listWebsiteMonitors(database, true);
+    const existingUrls = new Set(existing.map((m) => normalizeUrl(m.url)));
+
+    const preview = candidates
+      .filter((cand) => !requested || requested.includes(cand.hostname))
+      .map((cand) => {
+        const url = `https://${cand.hostname}`;
+        return {
+          hostname: cand.hostname,
+          url,
+          name: cand.hostname,
+          source: cand.source,
+          cf_project_name: cand.projectName,
+          cf_zone_id: cand.zoneId,
+          exists: existingUrls.has(normalizeUrl(url)),
+        };
+      });
+
+    if (dryRun) {
+      return c.json({
+        configured: true,
+        dryRun: true,
+        count: preview.length,
+        candidates: preview,
+        noPermission: Boolean(zones.noPermission || workers.noPermission || pages.noPermission),
+        error: zones.error || workers.error || pages.error,
+      });
+    }
+
+    // 实际导入：仅创建不存在的候选
+    const imported: Array<{ id: number; name: string; url: string; source?: string }> = [];
+    const skipped: typeof preview = [];
+    const errors: Array<{ hostname: string; error: string }> = [];
+    for (const cand of preview) {
+      if (cand.exists) { skipped.push(cand); continue; }
+      const input: Record<string, unknown> = {
+        name: cand.name,
+        url: cand.url,
+        method: 'GET',
+        expected_status_min: 200,
+        expected_status_max: 399,
+        interval_sec: 120,
+        timeout_sec: 10,
+        grace_period_sec: 180,
+        enabled: true,
+        hidden: false,
+        hide_url: false,
+        agent_probe_mode: 'off',
+        agent_probe_clients: [],
+        agent_probe_limit: 3,
+        agent_probe_status_enabled: true,
+        source: cand.source,
+        cf_zone_id: cand.cf_zone_id,
+        cf_project_name: cand.cf_project_name,
+      };
+      const validated = validateWebsiteMonitorInput(input);
+      if (!validated.ok) { errors.push({ hostname: cand.hostname, error: validated.error }); continue; }
+      try {
+        const monitor = await db.createWebsiteMonitor(database, validated.value);
+        imported.push({ id: monitor.id, name: monitor.name, url: monitor.url, source: monitor.source });
+      } catch (e) {
+        errors.push({ hostname: cand.hostname, error: sanitizeSetupDiagnosticDetail(e) });
+      }
+    }
+
+    invalidateWebsiteMonitorPublicState(c, { upsert: imported });
+    runAdminBackground(c, db.insertAuditLog(database, c.get('username')!, 'website_import_cf', `从 CF 导入网站监控: 新增 ${imported.length} / 跳过 ${skipped.length} / 失败 ${errors.length}`));
+    return c.json({ success: true, imported, skipped, errors, importedCount: imported.length, skippedCount: skipped.length, errorCount: errors.length });
+  } catch (error) {
+    console.error('[admin] website import-from-cf failed:', sanitizeSetupDiagnosticDetail(error));
+    return c.json({ error: 'CF 导入失败', detail: sanitizeSetupDiagnosticDetail(error) }, 500);
   }
 });
 

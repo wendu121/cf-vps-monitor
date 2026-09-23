@@ -255,6 +255,14 @@ export interface WebsiteMonitor {
   agent_probe_clients: string[];
   agent_probe_limit: number;
   agent_probe_status_enabled: boolean;
+  /**
+   * 监控项来源：'manual' | 'cf_worker' | 'cf_pages'（见 6_site_monitor.sql 的 CHECK 约束）。
+   * 列为可选：RPC 返回的 jsonb 由 `returning *` 生成，旧迁移部署前该键可能缺失。
+   */
+  source?: string;
+  /** 从 CF 资产导入时记录的归属：zone id 与 CF 项目名（worker 脚本名 / pages 项目名）。 */
+  cf_zone_id?: string | null;
+  cf_project_name?: string | null;
   sort_order: number;
   status: WebsiteMonitorStatus;
   last_checked_at: string | null;
@@ -414,6 +422,8 @@ export interface CfDomain {
   domain: string;
   zone_id: string | null;
   ssl_days_left: number | null;
+  /** SSL 数据来源：'cf_api' 官方 / 'ct_log' 公开 CT log 估算；null 表示未取到。 */
+  ssl_source: string | null;
   synced_at: string;
 }
 
@@ -423,6 +433,7 @@ export interface CfDomainInput {
   domain: string;
   zone_id?: string | null;
   ssl_days_left?: number | null;
+  ssl_source?: string | null;
   synced_at?: string;
 }
 

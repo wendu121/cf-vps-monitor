@@ -24,6 +24,11 @@ export interface WebsiteMonitorInput {
   agent_probe_clients: string[];
   agent_probe_limit: number;
   agent_probe_status_enabled: boolean;
+  /** 来源标记：manual（默认）/ cf_worker / cf_pages。用于 CF 资产导入溯源。 */
+  source?: 'manual' | 'cf_worker' | 'cf_pages';
+  /** 从 CF 资产导入时记录的归属：zone id 与 CF 项目名（worker 脚本名 / pages 项目名）。 */
+  cf_zone_id?: string | null;
+  cf_project_name?: string | null;
 }
 
 export type WebsiteMonitorValidationResult =
@@ -246,6 +251,9 @@ export function validateWebsiteMonitorInput(input: Record<string, unknown>): Web
       agent_probe_clients: readStringArray(input.agent_probe_clients),
       agent_probe_limit,
       agent_probe_status_enabled: typeof input.agent_probe_status_enabled === 'boolean' ? input.agent_probe_status_enabled : true,
+      source: input.source === 'cf_worker' || input.source === 'cf_pages' || input.source === 'manual' ? input.source : undefined,
+      cf_zone_id: typeof input.cf_zone_id === 'string' && input.cf_zone_id ? input.cf_zone_id : null,
+      cf_project_name: typeof input.cf_project_name === 'string' && input.cf_project_name ? input.cf_project_name : null,
     },
   };
 }

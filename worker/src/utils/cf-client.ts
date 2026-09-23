@@ -48,6 +48,18 @@ export interface CfCustomDomain {
   status?: string;
 }
 
+/**
+ * SSL 证书到期信息。`source` 明确标注数据来源，供落库与 UI 展示：
+ *   - 'cf_api'  → Cloudflare 官方 `/zones/{id}/ssl/certificate_packs`
+ *   - 'ct_log'  → 公开 CT log（crt.sh）估算，可能与边缘实际部署证书不同
+ *   - null      → 两路都未取到，`error` 给出原因（不伪装成「未知」）
+ */
+export interface CfSslInfo {
+  days: number | null;
+  source: 'cf_api' | 'ct_log' | null;
+  error?: string;
+}
+
 export interface CfListResult<T> {
   configured: boolean;
   items: T[];
@@ -251,27 +263,66 @@ export class CloudflareApi {
   }
 
   /**
-   * 读取 zone 的证书到期剩余天数（F3 SSL 清单）。
-   * 取所有证书中最早 expires_on 与当前时间的差值（天）。需 Zone.Zone:Read（已有）。
-   * 任一环节失败返回 null，不阻断主流程。
+   * 读取 zone 的证书到期剩余天数（F3 SSL 清单 / F5 增强）。
+   *
+   * 双路取数并**显式返回来源**，避免把「CT log 估算」冒充「CF 官方」：
+   *   1) 主路 `/zones/{id}/ssl/certificate_packs` —— 官方数据，
+   *      需 Token 具 `SSL and Certificates:Read`（线上实测：无此权限时
+   *      访问 certificate_packs / custom_certificates / certificates 全部
+   *      返回 403 code 9109，旧实现的 `/certificates` 因此恒失败 → 「未知」）。
+   *   2) 降级：公开 Certificate Transparency log（crt.sh）—— 无需凭据，
+   *      但有最长约 1 天的缓存延迟，且**不等于**边缘实际部署的证书。
+   * 两路皆失败返回 `{ days:null, source:null, error }`，由 UI 明示原因。
+   *
+   * @param hostname 可选。用于降级路径查 CT log；不传则仅走官方 API。
    */
-  async getZoneSslDaysLeft(zoneId: string): Promise<number | null> {
+  async getZoneSslInfo(zoneId: string, hostname?: string): Promise<CfSslInfo> {
+    let primaryError = '';
     try {
-      const j = await this.cfFetch(`/zones/${zoneId}/certificates?limit=100`);
-      const certs: any[] = j.result || [];
-      if (certs.length === 0) return null;
+      const j = await this.cfFetch(`/zones/${zoneId}/ssl/certificate_packs?per_page=50`);
+      const packs: any[] = j.result || [];
       const now = Date.now();
       let minDays: number | null = null;
-      for (const c of certs) {
-        const exp = Date.parse(c.expires_on || '');
-        if (!Number.isFinite(exp)) continue;
-        const days = Math.floor((exp - now) / 86_400_000);
-        if (minDays === null || days < minDays) minDays = days;
+      for (const p of packs) {
+        for (const c of p.certificates || []) {
+          const exp = Date.parse(c.expires_on || '');
+          if (!Number.isFinite(exp)) continue;
+          const days = Math.floor((exp - now) / 86_400_000);
+          if (minDays === null || days < minDays) minDays = days;
+        }
       }
-      return minDays;
+      if (minDays !== null) return { days: minDays, source: 'cf_api' };
+      primaryError = 'CF 未返回证书条目（可能为 CNAME 接入或证书尚未签发）';
     } catch (e) {
-      // 读取失败不应静默：记录服务日志，便于排障（UI 侧仍显示「未知」）。
-      console.error(`[cf-client] getZoneSslDaysLeft failed for zone ${zoneId}:`, e instanceof Error ? e.message : e);
+      primaryError = e instanceof Error ? e.message : String(e);
+    }
+
+    if (hostname) {
+      const ct = await this.ctLogSsl(hostname);
+      if (ct) return { days: ct.days, source: 'ct_log' };
+    }
+    console.error(`[cf-client] getZoneSslInfo failed for zone ${zoneId}: ${primaryError}`);
+    return { days: null, source: null, error: primaryError };
+  }
+
+  /** 公开 CT log 兜底：取该主机名最新（最晚 not_after）已签发证书的剩余天数。 */
+  private async ctLogSsl(hostname: string): Promise<{ days: number } | null> {
+    try {
+      const res = await fetch(`https://crt.sh/?q=${encodeURIComponent(hostname)}&output=json`, {
+        signal: AbortSignal.timeout(9000),
+        headers: { accept: 'application/json' },
+      });
+      if (!res.ok) return null;
+      const rows = (await res.json().catch(() => [])) as unknown as Array<{ not_after?: string }>;
+      if (!Array.isArray(rows)) return null;
+      let latest = 0;
+      for (const r of rows) {
+        const t = Date.parse(r.not_after || '');
+        if (Number.isFinite(t) && t > latest) latest = t;
+      }
+      if (!latest) return null;
+      return { days: Math.floor((latest - Date.now()) / 86_400_000) };
+    } catch {
       return null;
     }
   }

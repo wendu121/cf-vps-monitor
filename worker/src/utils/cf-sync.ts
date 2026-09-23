@@ -6,7 +6,7 @@
 
 import * as db from '../db/queries';
 import type * as t from '../db/types.ts';
-import type { CloudflareApi } from './cf-client';
+import type { CloudflareApi, CfSslInfo } from './cf-client';
 
 export interface CfSyncResult {
   domains: number;
@@ -72,14 +72,18 @@ export async function syncCfAssets(
     }
   }
 
-  // 按 zone 聚合证书到期天数（每个 zone 仅查一次）。
+  // 按 zone 聚合证书信息（每个 zone 仅查一次）；取该 zone 下任一主机名用于 CT log 降级。
   const zoneIds = Array.from(new Set(domainRows.map(r => r.zone_id).filter(Boolean) as string[]));
-  const sslByZone = new Map<string, number | null>();
+  const sslByZone = new Map<string, CfSslInfo>();
   await Promise.all(zoneIds.map(async (zid) => {
-    sslByZone.set(zid, await api.getZoneSslDaysLeft(zid));
+    const hostname = domainRows.find(r => r.zone_id === zid)?.domain;
+    sslByZone.set(zid, await api.getZoneSslInfo(zid, hostname));
   }));
   for (const r of domainRows) {
-    if (r.zone_id) r.ssl_days_left = sslByZone.get(r.zone_id) ?? null;
+    const info = r.zone_id ? sslByZone.get(r.zone_id) : undefined;
+    r.ssl_days_left = info?.days ?? null;
+    // 来源一并落库：UI 据此区分「CF 官方」与「CT log 估算」，不混淆可信度。
+    r.ssl_source = info?.source ?? null;
   }
 
   // 单事务同步（upsert + 删除旧行）；空输入跳过以防误删全表。

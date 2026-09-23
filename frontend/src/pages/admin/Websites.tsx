@@ -34,10 +34,11 @@ import {
   TextField,
   Tooltip,
 } from '@radix-ui/themes';
-import { ExternalLink, Eye, EyeOff, Globe2, GripVertical, Pencil, Plus, Power, RefreshCw, Save, Search, Trash2 } from 'lucide-react';
+import { Cloud, ExternalLink, Eye, EyeOff, Globe2, GripVertical, Pencil, Plus, Power, RefreshCw, Save, Search, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
 import Loading from '../../components/Loading';
 import WebsiteHeartbeatBar from '../../components/WebsiteHeartbeatBar';
+import WebsiteLatencyChart from '../../components/WebsiteLatencyChart';
 import { useApi } from '../../contexts/AuthContext';
 import { notifyWebsiteMonitorsUpdated, subscribeWebsiteMonitorsUpdated, type WebsiteMonitorsUpdateDetail } from '../../utils/websiteMonitorEvents';
 
@@ -635,6 +636,100 @@ export default function AdminWebsites() {
     notifyWebsiteMonitorsUpdated(updatedMonitor ? { upsert: [updatedMonitor] } : true);
   };
 
+  // —— F5 / Task #12：从 CF 资产一键导入网站监控 ——
+  interface ImportCandidate {
+    hostname: string;
+    url: string;
+    name: string;
+    source: 'cf_worker' | 'cf_pages';
+    cf_project_name: string | null;
+    cf_zone_id: string | null;
+    exists: boolean;
+  }
+  interface ImportResult {
+    importedCount: number;
+    skippedCount: number;
+    errorCount: number;
+    errors: Array<{ hostname: string; error: string }>;
+  }
+
+  const [importOpen, setImportOpen] = useState(false);
+  const [importLoading, setImportLoading] = useState(false);
+  const [importCandidates, setImportCandidates] = useState<ImportCandidate[]>([]);
+  const [importSelected, setImportSelected] = useState<Set<string>>(new Set());
+  const [importRunning, setImportRunning] = useState(false);
+  const [importResult, setImportResult] = useState<ImportResult | null>(null);
+  const [importError, setImportError] = useState<string | null>(null);
+
+  const openImport = async () => {
+    setImportOpen(true);
+    setImportLoading(true);
+    setImportResult(null);
+    setImportError(null);
+    try {
+      const data = await apiFetch('/admin/websites/import-from-cf', { method: 'POST', body: JSON.stringify({ dryRun: true }) });
+      const payload = data as { configured: boolean; error?: string; candidates?: ImportCandidate[] };
+      if (!payload.configured) {
+        setImportError(payload.error || 'CF 凭据未配置（请在设置中填写 cf_api_token / cf_account_id）');
+        setImportCandidates([]);
+        return;
+      }
+      const cands = payload.candidates || [];
+      setImportCandidates(cands);
+      // 默认勾选不存在的候选
+      setImportSelected(new Set(cands.filter((c) => !c.exists).map((c) => c.hostname)));
+    } catch (error) {
+      setImportError(error instanceof Error ? error.message : '加载候选失败');
+    } finally {
+      setImportLoading(false);
+    }
+  };
+
+  const toggleImportSelect = (hostname: string) => {
+    setImportSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(hostname)) next.delete(hostname);
+      else next.add(hostname);
+      return next;
+    });
+  };
+
+  const runImport = async () => {
+    setImportRunning(true);
+    setImportError(null);
+    setImportResult(null);
+    try {
+      const data = await apiFetch('/admin/websites/import-from-cf', {
+        method: 'POST',
+        body: JSON.stringify({ dryRun: false, urls: Array.from(importSelected) }),
+      });
+      const payload = data as {
+        success?: boolean;
+        error?: string;
+        detail?: string;
+        importedCount?: number;
+        skippedCount?: number;
+        errorCount?: number;
+        errors?: Array<{ hostname: string; error: string }>;
+      };
+      if (!payload.success) throw new Error(payload.error || '导入失败');
+      setImportResult({
+        importedCount: payload.importedCount || 0,
+        skippedCount: payload.skippedCount || 0,
+        errorCount: payload.errorCount || 0,
+        errors: payload.errors || [],
+      });
+      await loadMonitors(true).catch(() => {});
+      notifyWebsiteMonitorsUpdated(true);
+      toast.success(`已导入 ${payload.importedCount || 0} 个网站监控`);
+    } catch (error) {
+      setImportError(error instanceof Error ? error.message : '导入失败');
+      toast.error(error instanceof Error ? error.message : '导入失败');
+    } finally {
+      setImportRunning(false);
+    }
+  };
+
   if (loading) return <Loading />;
 
   return (
@@ -694,6 +789,7 @@ export default function AdminWebsites() {
               </Button>
             </Flex>
             <Button className="admin-add-server-button" size="1" onClick={() => openEdit(null)}><Plus size={16} /> 添加网站</Button>
+            <Button className="admin-cf-import-button" size="1" variant="soft" onClick={() => openImport()}><Cloud size={16} /> 从 CF 导入</Button>
           </Flex>
         </Flex>
       </Card>
@@ -885,7 +981,18 @@ export default function AdminWebsites() {
                 )}
               </Flex>
             )}
-            {editMonitor && <WebsiteHeartbeatBar checks={checks} max={60} />}
+            {editMonitor && (
+              <div className="admin-website-charts">
+                <div className="admin-website-chart-block">
+                  <Text size="1" weight="bold" className="admin-website-chart-label">最近检测状态</Text>
+                  <WebsiteHeartbeatBar checks={checks} max={60} />
+                </div>
+                <div className="admin-website-chart-block">
+                  <Text size="1" weight="bold" className="admin-website-chart-label">延迟趋势</Text>
+                  <WebsiteLatencyChart checks={checks} height={200} />
+                </div>
+              </div>
+            )}
             <Flex gap="2" justify="end" wrap="wrap">
               <Flex gap="2">
                 <Button variant="soft" color="gray" onClick={() => setEditOpen(false)}>取消</Button>
@@ -894,6 +1001,65 @@ export default function AdminWebsites() {
             </Flex>
           </Flex>
           </div>
+        </Dialog.Content>
+      </Dialog.Root>
+
+      <Dialog.Root open={importOpen} onOpenChange={setImportOpen}>
+        <Dialog.Content aria-describedby={undefined} style={{ maxWidth: 620 }}>
+          <Dialog.Title>从 CF 导入网站监控</Dialog.Title>
+          {importLoading ? (
+            <Text size="2" color="gray">正在拉取 CF 资产候选域名...</Text>
+          ) : importError ? (
+            <Text size="2" color="red">{importError}</Text>
+          ) : importResult ? (
+            <Flex direction="column" gap="3">
+              <Text size="2">
+                导入完成：新增 <strong>{importResult.importedCount}</strong>，已存在跳过 <strong>{importResult.skippedCount}</strong>
+                {importResult.errorCount > 0 ? `，失败 ${importResult.errorCount}` : ''}。
+              </Text>
+              {importResult.errors.length > 0 && (
+                <Box className="admin-import-errors">
+                  {importResult.errors.map((e) => (
+                    <Text key={e.hostname} size="1" color="red">{e.hostname}: {e.error}</Text>
+                  ))}
+                </Box>
+              )}
+              <Flex gap="2" justify="end">
+                <Button variant="soft" onClick={() => setImportOpen(false)}>关闭</Button>
+              </Flex>
+            </Flex>
+          ) : (
+            <Flex direction="column" gap="3">
+              <Text size="2" color="gray">勾选要导入的域名（已存在会自动跳过）。来源为 Worker / Pages 子域名，不含 zone 裸域名。</Text>
+              <Box className="admin-import-candidate-list" style={{ maxHeight: 320, overflowY: 'auto' }}>
+                {importCandidates.length === 0 ? (
+                  <Text size="2" color="gray">没有可导入的 CF 域名（可能无自定义域名，或已全部在监控中）。</Text>
+                ) : (
+                  importCandidates.map((c) => (
+                    <Flex key={c.hostname} className="admin-import-candidate" align="center" gap="2" justify="between">
+                      <Flex align="center" gap="2">
+                        <Checkbox
+                          checked={importSelected.has(c.hostname)}
+                          disabled={c.exists}
+                          onCheckedChange={() => !c.exists && toggleImportSelect(c.hostname)}
+                        />
+                        <Text size="2">{c.hostname}</Text>
+                        <Badge variant="soft" color={c.source === 'cf_worker' ? 'blue' : 'purple'}>{c.source === 'cf_worker' ? 'Worker' : 'Pages'}</Badge>
+                      </Flex>
+                      {c.exists ? <Text size="1" color="gray">已存在</Text> : <Text size="1" color="gray">{c.cf_project_name || '-'}</Text>}
+                    </Flex>
+                  ))
+                )}
+              </Box>
+              <Flex gap="2" justify="end" align="center">
+                <Text size="1" color="gray">将导入 {importSelected.size} 个</Text>
+                <Button variant="soft" onClick={() => setImportOpen(false)}>取消</Button>
+                <Button onClick={runImport} disabled={importRunning || importSelected.size === 0}>
+                  {importRunning ? '导入中...' : '导入选中'}
+                </Button>
+              </Flex>
+            </Flex>
+          )}
         </Dialog.Content>
       </Dialog.Root>
     </Flex>
