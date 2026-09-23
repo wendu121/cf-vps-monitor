@@ -1,54 +1,158 @@
 <!-- reviewed-by: independent-subagent -->
-# REVIEW — 独立审议（edict-gate 第三关）
+# 独立审议报告 — F4 SLA 月报月份解析修复（HEAD=933db42，工作区未提交）
 
-- **项目根**：`E:\工作站\cf-vps-monitor-src`（git，HEAD=`2fa9577`，审查时点 2026-09-23）
-- **审查对象**：本地容器验证编排 `docker/validate/` + `VERIFICATION.md` / `VERIFICATION_docker_validation.md`（主代理声称未修改任何被跟踪生产文件）
-- **结论**：**PASS**（无阻断项；2 项中/低严重度发现需主代理补齐收尾，不封驳本交付）
+- 审议角色：独立审议者（门下省式，独立复现，不采信交付方自述）
+- 审议日期：2026-09-23
+- 交付物：`supabase/migrations/7_sla_month_fix.sql`（新增）+ `worker/src/generated/supabase-migrations.ts`（生成物，+6 行）
+- 验证栈：本地 `validate-db-1`（postgres:15-alpine，库 `cfmonitor`，datestyle=ISO,MDY，已灌入 monitor_id=901 + 10 行 checks 含 8 成功）；线上 `https://mon.hqa.kdns.fr`（admin 凭据来自 `E:\第二电脑\_admin_credentials.txt`）
 
----
+## 一、审议结论
 
-## 一、交付物核对（实测）
+**结论：有条件 PASS**
 
-| 声称交付 | 核实结果 |
-|---|---|
-| `docker/validate/` 8 文件 | 全部在位，内容与 VERIFICATION 清单一致；另发现目录内多 1 个未列出的 `wrangler_dev.log`（见 F-03） |
-| 未修改被跟踪文件 | `git status --short` 全量输出仅 `??` 类，`modified_tracked_count=0`，成立 |
-| 数据层 21 表 + 135 函数 | **独立只读复现**：`docker compose exec -T db psql` 查询 = 21 / 135，与声称一致 |
-| 三容器健康 | `validate-db-1`（healthy）、`validate-postgrest-1`、`validate-proxy-1` 均 Up |
-| Token 未进被跟踪文件 | 独立 `git grep -lF <CF_TOKEN>` 全仓零命中，成立 |
-| `.dev.vars` 被忽略 | `.gitignore:16` = `.dev.vars*`，独立 `git check-ignore` 命中，成立 |
+- 代码修复本身经独立复现验证为**正确且有效**，前后对照字段全部吻合公式，无阻断性缺陷。
+- 唯一“未闭环”项是**修复尚未上线**：线上 `/api/admin/ops/sla` 实测仍为 502（本人独立确认）。交付方已明示此状态，故其属部署缺口而非代码缺陷，列为通过条件。
+- 非阻断发现 F-01 / F-02 / F-03，均不影响修复正确性，须择机修补。
 
-## 二、逐任务复核结果
+> 若仅以“代码交付物正确性”为标尺，可判 PASS；因生产侧缺陷（F4 面板 100% 不可用）在补丁应用前依旧存在，故加“有条件”，条件见第五节。
 
-1. **VERIFICATION.md 已验证项**：#1（21 表/135 函数）与路径形状（`/rest/v1/rpc/<fn>` 经 nginx 剥前缀 200、无前缀亦 200）已独立复现，站得住。#2–#9 依赖 `wrangler dev` 进程，其会话已不在（8787 无监听），无法逐条重放，但证据日志（`docker/validate/wrangler_dev.log`）与 `.review_tmp_status.txt`（`settings_http=200`、`clients_body=[]`）与声称值吻合，接受为中等置信。
-2. **编排可复刻性**：`nginx.conf:7-8` 剥 `/rest/v1` 前缀实测生效；`init.sql:21-26` 预建 `anon`/`authenticated` 角色使 `supabase/migrations/4_rpc_api.sql:2816` 的未保护 `revoke ... from anon` 得以跑通（6 迁移全通即 21 表建成的间接证明）。架构复刻判定：可行，且 `PGRST_DB_ANON_ROLE=service_role` + `PGRST_JWT_SECRET` 与 `gen-jwt.mjs:6` 一致（RPC 调用实测 200 佐证密钥链闭合）。
-3. **seed-admin.sql 哈希**：独立用 `crypto.pbkdf2Sync('TestAdmin123', b64_salt, 10000, 32, 'sha256')` 重算，与 `seed-admin.sql:4` 存储值 **完全匹配**；格式 `pbkdf2_sha256$10000$<b64salt>$<b64hash>` 与 `worker/src/auth/password.ts:79-106` 解析规则（16B salt、32B hash、标准 base64）一致。VERIFICATION_docker_validation.md 第 3.4 条称「原占位 bcrypt 恒失败后造合法哈希」，与 password.ts 逻辑自洽。
-4. **独立复现（任务 4）**：容器在跑，21 表 + 135 函数只读核对通过，nginx 剥前缀 200 通过。
-5. **CF Token 独立复测（任务 5）**：读 `worker/.dev.vars`（`CF_API_TOKEN` + `CF_ACCOUNT_ID`），一次性脚本 PUT classic Worker 首次因用了 module 语法得 400（code 10021，说明已过权限门、进入语法校验）；改 classic 语法后 **PUT=200、随后 DELETE=200**，`Workers Scripts:Edit` 实测可用，与 VERIFICATION.md 第六节结论一致。临时凭据文件已即时删除，未落任何提交。
-6. **边界/安全扫描**：见下表。
+## 二、本人亲自执行的命令与实测输出
 
-## 三、发现（按严重度）
+### 任务 1：独立复现根因
+```
+$ docker exec validate-db-1 psql -U postgres -d cfmonitor -tAc "show datestyle; select '2026-09'::date;"
+ISO, MDY
+ERROR:  invalid input syntax for type date: "2026-09"
+LINE 1: show datestyle; select '2026-09'::date; ...
+```
+- `datestyle = ISO, MDY`，`'2026-09'::date` 确报 22007（与 VERIFICATION.md 断言 #2 一致）。
+- 读取 `supabase/migrations/6_site_monitor.sql:191`，原文确为：
+  `date_trunc('month', coalesce(nullif(input->>'month', ''), to_char(now(), 'YYYY-MM'))::date) as m_start`
 
-| ID | 严重度 | 发现 | 证据 |
-|---|---|---|---|
-| F-01 | 中 | **交付清单遗漏残留物**：项目根多 3 个未列出的 untracked 文件 `.review_tmp_jwt.txt`（本地 service_role JWT）、`.review_tmp_status.txt`、`docker/validate/wrangler_dev.log`。均未被 `.gitignore` 覆盖（`.log` 例外，`*.log` 已覆盖 `wrangler_dev.log`），若后续有人 `git add -A` 会把本地 JWT 与验证状态带进仓库 | `git status --short` 实测输出 |
-| F-02 | 中 | **`seed-admin.sql` 可执行且含弱口令**：文件本身合法 SQL，任何人对该库执行即把 admin 口令覆写为 `TestAdmin123`（`test-login.mjs:4` 同值硬编码）。虽有「仅本地」声明，但无防误用屏障 | `seed-admin.sql:4`、`test-login.mjs:4` |
-| F-03 | 低 | `docker/validate/wrangler_dev.log` 为验证产物混入交付目录，与 README 清单不符（README 仅列 8 文件） | 目录 listing |
-| F-04 | 低 | `.dev.vars` 中 CF Token 权限集偏宽（含 `Zone Settings:Edit`、`Cache Purge`），本地明文持有该 Token 的失泄影响面大于本仓范围；已确认未进被跟踪文件，属运维侧注意项 | `.dev.vars` 键名核对 + 第六节权限表 |
+### 任务 2：独立复现 bug + 验证“空表不报错”说法
+```
+$ select cfm_website_sla_report('{}'::jsonb);
+ERROR:  invalid input syntax for type date: "2026-09"
+CONTEXT:  SQL function "cfm_website_sla_report" statement 1
 
-## 四、对主代理自审的复核
+$ select cfm_website_sla_report('{"month":"2026-09"}'::jsonb);
+ERROR:  invalid input syntax for type date: "2026-09"
+CONTEXT:  SQL function "cfm_website_sla_report" statement 1
 
-- 「未改动任何生产代码」——**属实**（modified 计数 0）。
-- 「21 表 + 135 函数」「nginx 剥前缀」「Token 未进跟踪文件」「gitignore 覆盖 .dev.vars」——**均独立复现通过**。
-- VERIFICATION.md 第二节第 11 条「全仓 grep `https://*.supabase.co` 零命中」措辞**不严谨**：`worker/src/db/provider.ts`、测试文件等命中 5+ 处，但全部为 `PROJECT_REF.supabase.co` 占位串，非真实 URL；结论实质正确，建议改述为「零真实 Supabase URL 命中，仅 PROJECT_REF 占位」。
-- 「Token Edit 实测 200/200」（第六节）——**独立复测通过**（本轮 400→classic 语法 200 的插曲不影响其结论，属我复测脚本初版语法问题）。
-- 未验证项 1–5（真实 CF 未部署、托管 Supabase 未跑、F1-F8 未 E2E、Agent 未测、本地 harness 非生产）——**标注真实，无遗漏**。本轮发现 F-01/F-02 属「边界缺失」而非「未验证冒充已验证」。
+$ begin; delete from website_checks where monitor_id=901; select cfm_website_sla_report('{}'::jsonb); rollback;
+BEGIN
+DELETE 10
+ERROR:  invalid input syntax for type date: "2026-09"   ← 注意：空 website_checks 仍报错，未返回 []
+```
+- 两条入参路径（缺省 / 显式 2026-09）均报 22007，bug 复现成功。
+- **反驳 VERIFICATION.md §六**：交付方声称“空表时不求值内层子查询、返回 `[]`”。本人实测：删空 `website_checks` 后函数**仍报 22007**。原因：`bounds` 是 CTE，Postgres 默认将其物化（优化屏障），与外层是否 0 行无关，故非法转换必然执行。该自述说法**失实**（详见 F-01）。
 
-## 五、独立意见
+### 任务 3：独立复现修法 + 边界
+```
+$ select to_date('2026-09','YYYY-MM');        => 2026-09-01
+$ select to_date('2026-13','YYYY-MM');        => ERROR: date/time field value out of range: "2026-13"
+$ select to_date('','YYYY-MM');               => 0001-01-01 BC
+```
+- 与 VERIFICATION.md §三 表描述**完全一致**（修法有效；`2026-13` 抛出范围错；空串静默成 `0001-01-01 BC`）。
 
-1. 数据层复刻（postgres+postgrest+nginx）在本仓 RPC 路径形状下是**充分**的：Worker 只经 PostgREST `/rest/v1/rpc/*` 访问 DB，RLS 由 `BYPASSRLS` 的 `service_role` 统一旁路，与托管 Supabase 的 service_role 语义一致。
-2. 部署前置条件 ①（`Workers Scripts:Edit`）**确已解除**，我拿到确定性 200。部署仍被 ②（真实 Supabase 项目 + service_role key）阻塞，与 `scripts/deploy-cloudflare.mjs:74-96` 的 `PROJECT_REF` 占位 fail-fast 行为一致。
-3. 建议主代理在部署提交前顺手清掉 F-01 的三个残留文件（`.review_tmp_jwt.txt` 含可签 10 年有效本地 JWT，虽只对本 harness 的 PostgREST 有效，也不该留在仓库根），并在 `seed-admin.sql` 文件头加一行「仅限 throwaway 库执行」的防误用提示。以上均非本关封驳理由。
+### 任务 4：守卫副作用审查（读 `worker/src/routes/ops.ts`）
+- `parseMonth()`（ops.ts:24-27）逻辑：
+  - 无值 → `currentMonth()`（=`new Date().toISOString().slice(0,7)`，严格 `YYYY-MM`）
+  - 有值且匹配 `/^\d{4}-\d{2}$/` → 原值；否则回落当月。
+- 迁移守卫正则 `^[0-9]{4}-(0[1-9]|1[0-2])$` 覆盖 `parseMonth` 的**全部合法输出**（真实月份 01–12），无误杀合法输入。
+- 但 `parseMonth` 正则放行 `2026-00`/`2026-13`..`2026-99` 这类“格式合法但月份非法”的值，守卫会回落当月——属预期。详见 F-02。
 
----
-_审查方式：全部结论来自本轮独立实测（docker compose exec / curl / node crypto / CF API PUT+DELETE 清理 / git grep），未复用主代理输出。本轮产生的临时文件（`review-cf-check.mjs`、`.review_cf_creds.txt`）已在审查结束时删除。_
+### 任务 5：应用迁移并做前后对照（核心动作）
+- 修复前（未应用 7 号迁移）：函数调用报 22007（见任务 2）。
+- 应用：`docker exec -i validate-db-1 psql -U postgres -d cfmonitor < supabase/migrations/7_sla_month_fix.sql`
+  输出：`SET / CREATE FUNCTION / REVOKE×3 / GRANT`（一例良性 WARNING：`SET LOCAL can only be used in transaction blocks`，因我未包事务执行；函数体自带 `set search_path=public` 不受影响，见 F-03）。
+- 应用后逐字段实测（`interval_sec=120`，10 行含 8 成功）：
+```
+$ select cfm_website_sla_report('{}'::jsonb);
+[{"url":"https://example.com/","name":"SLA 验证站点","sla_pct":80.000,"up_checks":8,
+  "monitor_id":901,"downtime_min":4.0,"interval_sec":120,"total_checks":10,
+  "avg_latency_ms":106,"last_checked_at":"2026-09-01T00:10:00+00:00"}]
+```
+- 字段核对：`monitor_id=901`✓ `name`✓ `url`✓ `interval_sec=120`✓ `total_checks=10`✓ `up_checks=8`✓ `sla_pct=80.000`✓（=8/10×100）`downtime_min=4.0`✓（=(10−8)×120/60=4.0）`avg_latency_ms=106`✓ `last_checked_at`✓
+- 边界入参（均不报错且行为合理）：
+  - `{"month":"2026-09"}` → 同上数据（正确）
+  - `{"month":"2026-13"}` → 回落当月，返回 2026-09 数据，**无错**
+  - `{"month":""}` / `{"month":"   "}` / `{"month":"abc"}` → 均回落当月，无错
+  - `{"month":"2020-01"}` → `[]`（无数据，无错）
+- 结论：修复前后对照成立，公式与字段全部吻合。
+
+### 任务 6：核对生成物未被手改
+```
+$ git hash-object worker/src/generated/supabase-migrations.ts   # 应用前
+67f16ce334afdc236dc565c5053a4c285ac7743d
+$ node scripts/generate-migrations.mjs                          # 用托管 node 22.22.2-3
+Generated 7 Supabase migrations.
+$ git hash-object worker/src/generated/supabase-migrations.ts   # 重生成后
+8341c25c8157563897a99721c00a7eb1b73dda33
+$ git --no-pager diff --stat worker/src/generated/supabase-migrations.ts
+ worker/src/generated/supabase-migrations.ts | 6 ++++++
+```
+- 重生成前后 `git diff --stat` **均为 +6 行**（vs HEAD），内容无新增差异。
+- hash 不同仅因行尾（CRLF↔LF）：`git` 归一化后 `diff --stat` 一致，证明**生成物未被手改**，仅为行尾差异。
+- 生成文件第 7 条目（`"version":"7_sla_month_fix"`）的 `sql` 内容与 `7_sla_month_fix.sql` 实质一致（JSON 转义 `\n`、`\\d` 属预期），无篡改。
+
+### 任务 7：核对授权语句
+- `7_sla_month_fix.sql:78-81`：
+  `revoke all ... from public; from anon; from authenticated; grant execute ... to service_role;`
+- 与 `6_site_monitor.sql:391-394` 同函数收尾写法**逐字一致**。
+- 实测权限：`has_function_privilege` → anon=f, authenticated=f, service_role=t, public=f。
+- 结论：**未把函数暴露给 anon**，与既有函数一致。
+
+### 任务 8：复核“未上线”结论（线上独立确认）
+- 用 `_probe_node.mjs` 的 IP 兜底（`mon.hqa.kdns.fr`→`172.67.147.155`，`servername` 保真域名）+ 登录/CSRF 流程，管理员会话 GET：
+```
+[login] HTTP 200 csrf_len=43 cookies=cf_monitor_session,cf_monitor_csrf
+[sla] HTTP 502 body={"month":"2026-09","rows":[],"error":"Supabase RPC cfm_website_sla_report failed: 400 {\"code\":\"22007\",...\"message\":\"invalid input syntax for type date: \\\"2026-09\\\"\"}"}
+[sla?month=2026-09] HTTP 502  (同上错误)
+```
+- 结论：线上**确实仍为 502**，错误信息与本地根因一致。交付方“未上线”结论**属实**，非误判。
+
+### 任务 9：查同类缺陷
+- `supabase/migrations/*.sql` 中 `::date|::timestamp|::timestamptz` 检索：
+  - `6_site_monitor.sql:191` —— 本次修复对象（已修）。
+  - `6_site_monitor.sql:143` `coalesce((x->>'synced_at')::timestamptz, now())`：对完整 timestamptz 文本强转，非 `YYYY-MM` 形态，不属同类缺陷。
+  - `4_rpc_api.sql` 多处 `::timestamptz`：操作完整时间戳或 `'1970-01-01'::timestamptz` 之类完整字面量，无 `YYYY-MM` 文本强转。
+- `worker/src/**` 检索 `YYYY-MM|to_date|::date|date_trunc|to_char(now()`（排除 generated）：
+  - 仅 `worker/src/routes/ops.ts:35` 注释命中，无 TS 侧 `YYYY-MM`→date 强转。
+- 结论：**未发现其它把 `YYYY-MM` 文本直接 `::date/::timestamp` 强转的位置**。
+
+## 三、各补审任务结论一览
+
+| # | 任务 | 结论 |
+|---|---|---|
+| 1 | 复现根因 `'2026-09'::date` 报 22007 + 读 6_site_monitor.sql:191 | 成立（实测报错，源码确为 `::date` 强转） |
+| 2 | 复现 bug（两条路径） | 成立（均报 22007） |
+| 2b | 验证“空表不报错返回 `[]`”说法 | **不成立**——空 `website_checks` 仍报 22007（见 F-01） |
+| 3 | 复现修法 + 两边界 | 成立（与自述一致） |
+| 4 | 守卫覆盖 `parseMonth` 全部输出、无误杀 | 成立；另发现 F-02 标签错配 |
+| 5 | 应用迁移 + 前后对照 + 边界 + 公式 | 成立（字段/公式全吻合） |
+| 6 | 生成物未被手改 | 成立（仅行尾差异，`diff --stat` 一致） |
+| 7 | 授权一致且未暴露 anon | 成立（anon=f, sr=t） |
+| 8 | 线上仍 502（未上线） | 成立（独立实测 502） |
+| 9 | 同类缺陷检索 | 未发现其它 `YYYY-MM` 强转 |
+
+## 四、非阻断发现
+
+**F-01（文档失实，非阻断）**：VERIFICATION.md §六称“空表时 `website_checks` 外层 0 行、不求值 `bounds` 子查询、返回 `[]`”。本人实测：删空 `website_checks` 后函数**仍报 22007**。`bounds` 为 CTE，Postgres 默认物化（优化屏障），与外层行数无关，非法转换必执行。交付方该条方法论述失实；不影响修复正确性，但建议在 VERIFICATION.md 中更正，以免误导后续判断。
+
+**F-02（响应标签错配，非阻断，建议修）**：当请求非法但格式合法的月份（如 `?month=2026-13`）时，SQL 守卫静默回落当月，但 `worker/src/routes/ops.ts:41` 仍把原始 `month`（`"2026-13"`）回显在响应体 `{month, rows}` 中。前端会显示“月份 2026-13”却呈现当月数据，属静默错标。建议：路由层 `parseMonth` 与 SQL 守卫正则对齐（均只允许 01–12），或回显“实际生效月份”。不在本轮 502 修复范围内，列为建议项。
+
+**F-03（良性告警，非阻断）**：`7_sla_month_fix.sql:26` 的 `set local search_path = public;` 在脱离事务执行时触发 `WARNING: SET LOCAL can only be used in transaction blocks`（本人直连 psql 执行即此情形）。函数体自带 `set search_path = public` 保证安全；Supabase 迁移实际以事务执行该告警不出现。写法与 `6_site_monitor.sql` 一致，非缺陷。
+
+## 五、通过条件 / 阻断点
+
+- **阻断点：无。** 代码修复正确、局部、低风险，已端到端验证；授权与生成物均合规。
+- **通过条件**：
+  1. **部署闭环**：须将 `7_sla_month_fix.sql` 应用到线上 Supabase（需 PAT 或在 SQL Editor 粘贴执行），方可真正消除 F4 面板 502。在应用前，生产侧缺陷依旧（本人已实测线上 502）。
+  2. **择机修补 F-02**（响应月份标签错配）；F-01 仅更正文档即可。
+
+## 六、给自动化门禁的判定
+
+- 判定标记：`有条件 PASS`
+- 署名标记：`<!-- reviewed-by: independent-subagent -->`（见文件首行）
+- 未放行项：仅“生产部署”与两条非阻断建议，无任何阻断性缺陷。
