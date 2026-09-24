@@ -122,3 +122,73 @@ for (const { table, create, argument, fields } of identityModules) {
     }
   });
 }
+
+// 回归测试（闭环 follow-up #1）：还原路径必须保留「非默认」的 CF 归属列。
+// 此前 cfm_restore_backup_data 的 website_monitors UPSERT 漏掉 source / cf_zone_id /
+// cf_project_name —— 导出带 CF 归属、还原静默打回 'manual'/NULL。原 AUD-06 用例用的
+// 全是默认 CF 值（'manual'/NULL），与还原丢列后的结果一致，故未能暴露该半修复。
+// 这里用非默认值：还原前后 source/cf_zone_id/cf_project_name 必须完全一致。
+test('AUD-06 restore preserves non-default CF attribution (source/cf_zone_id/cf_project_name)', async () => {
+  const database = await createTestDatabase();
+  try {
+    await database.exec('set role service_role');
+    const created = await rpc(database, 'cfm_create_website_monitor', {
+      input_monitor: {
+        name: 'CF imported site',
+        url: 'https://cf.example.com/',
+        source: 'cf_worker',
+        cf_zone_id: 'zone-abc123',
+        cf_project_name: 'my-project',
+      },
+    });
+
+    const before = (await rpc(database, 'cfm_website_monitors')).find(row => row.id === created.id);
+    assert.deepEqual(
+      { source: before.source, cf_zone_id: before.cf_zone_id, cf_project_name: before.cf_project_name },
+      { source: 'cf_worker', cf_zone_id: 'zone-abc123', cf_project_name: 'my-project' },
+      'precondition: CF attribution is stored and readable',
+    );
+
+    // 仅 website_monitors 模块、携带非默认 CF 值走还原路径
+    const backup = {
+      website_monitors: [{
+        id: created.id,
+        name: 'CF imported site',
+        url: 'https://cf.example.com/',
+        source: 'cf_worker',
+        cf_zone_id: 'zone-abc123',
+        cf_project_name: 'my-project',
+        enabled: true,
+      }],
+    };
+    await rpc(database, 'cfm_restore_backup_data', { input_backup: backup });
+    const after = (await rpc(database, 'cfm_website_monitors')).find(row => row.id === created.id);
+    assert.deepEqual(
+      { source: after.source, cf_zone_id: after.cf_zone_id, cf_project_name: after.cf_project_name },
+      { source: 'cf_worker', cf_zone_id: 'zone-abc123', cf_project_name: 'my-project' },
+      'restore must carry CF attribution columns, not reset them to manual/null',
+    );
+
+    // ON CONFLICT 覆盖路径：再次还原、CF 值改成另一个非默认值，必须覆盖而非保留旧值
+    const backup2 = {
+      website_monitors: [{
+        id: created.id,
+        name: 'CF imported site',
+        url: 'https://cf.example.com/',
+        source: 'cf_pages',
+        cf_zone_id: 'zone-def456',
+        cf_project_name: 'other-project',
+        enabled: true,
+      }],
+    };
+    await rpc(database, 'cfm_restore_backup_data', { input_backup: backup2 });
+    const after2 = (await rpc(database, 'cfm_website_monitors')).find(row => row.id === created.id);
+    assert.deepEqual(
+      { source: after2.source, cf_zone_id: after2.cf_zone_id, cf_project_name: after2.cf_project_name },
+      { source: 'cf_pages', cf_zone_id: 'zone-def456', cf_project_name: 'other-project' },
+      'restore must overwrite CF attribution on conflict when the backup carries new values',
+    );
+  } finally {
+    await database.close();
+  }
+});

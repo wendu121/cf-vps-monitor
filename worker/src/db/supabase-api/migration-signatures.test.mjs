@@ -13,6 +13,7 @@ assert.deepEqual(migrationFiles, [
   '6_site_monitor.sql',
   '7_sla_month_fix.sql',
   '8_sla_leftjoin_cf_source.sql',
+  '9_restore_cf_source.sql',
 ]);
 assert.deepEqual(BUNDLED_SUPABASE_MIGRATIONS.map(({ version }) => version), [
   '1_core_schema',
@@ -23,6 +24,7 @@ assert.deepEqual(BUNDLED_SUPABASE_MIGRATIONS.map(({ version }) => version), [
   '6_site_monitor',
   '7_sla_month_fix',
   '8_sla_leftjoin_cf_source',
+  '9_restore_cf_source',
 ]);
 
 const featureSchemaSql = await readFile(new URL('3_feature_schema.sql', migrationsUrl), 'utf8');
