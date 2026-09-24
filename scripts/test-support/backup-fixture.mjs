@@ -4,21 +4,24 @@ export const websiteConfiguration = [
     expected_status_min: 200, expected_status_max: 299, interval_sec: 120,
     timeout_sec: 10, grace_period_sec: 180, enabled: true, hidden: false,
     hide_url: false, agent_probe_mode: 'off', agent_probe_clients: [],
-    agent_probe_limit: 3, agent_probe_status_enabled: false, sort_order: 3,
+    agent_probe_limit: 3, agent_probe_status_enabled: false,
+    source: 'manual', cf_zone_id: null, cf_project_name: null, sort_order: 3,
   },
   {
     id: 9, name: 'Synthetic HEAD', url: 'https://example.org/status', method: 'HEAD',
     expected_status_min: 204, expected_status_max: 399, interval_sec: 300,
     timeout_sec: 20, grace_period_sec: 600, enabled: false, hidden: true,
     hide_url: true, agent_probe_mode: 'selected', agent_probe_clients: ['node-a', 'node-b'],
-    agent_probe_limit: 2, agent_probe_status_enabled: true, sort_order: 1,
+    agent_probe_limit: 2, agent_probe_status_enabled: true,
+    source: 'manual', cf_zone_id: null, cf_project_name: null, sort_order: 1,
   },
   {
     id: 11, name: 'Synthetic TCP', url: 'tcp://example.net:443', method: 'TCP',
     expected_status_min: 200, expected_status_max: 399, interval_sec: 60,
     timeout_sec: 3, grace_period_sec: 60, enabled: true, hidden: false,
     hide_url: true, agent_probe_mode: 'country_auto', agent_probe_clients: [],
-    agent_probe_limit: 4, agent_probe_status_enabled: true, sort_order: 2,
+    agent_probe_limit: 4, agent_probe_status_enabled: true,
+    source: 'manual', cf_zone_id: null, cf_project_name: null, sort_order: 2,
   },
 ];
 

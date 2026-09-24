@@ -433,6 +433,10 @@ export function websiteMonitorConfiguration(monitor: WebsiteMonitor): WebsiteMon
     agent_probe_clients: [...monitor.agent_probe_clients],
     agent_probe_limit: monitor.agent_probe_limit,
     agent_probe_status_enabled: monitor.agent_probe_status_enabled,
+    // CF 资产归属也是配置：备份不带上它们，恢复后 CF 关联静默丢失。
+    source: monitor.source === 'cf_worker' || monitor.source === 'cf_pages' || monitor.source === 'manual' ? monitor.source : undefined,
+    cf_zone_id: monitor.cf_zone_id ?? null,
+    cf_project_name: monitor.cf_project_name ?? null,
     sort_order: monitor.sort_order,
   };
 }
