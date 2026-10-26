@@ -39,6 +39,32 @@ jobs:
 
       # Both packages type-check here: frontend runs `tsc --noEmit`,
       # worker runs `wrangler types --check && tsc --noEmit`.
+      #
+      # `wrangler types` folds every key in worker/.dev.vars into the generated
+      # env interface, and that file is gitignored. Without it CI derives a
+      # different Env than the committed worker-configuration.d.ts (which was
+      # generated from the five bindings below), so `--check` can never pass.
+      # Seeding the same key set with placeholder values keeps CI aligned with
+      # the committed declaration without shipping any real secret.
+      #
+      # Two things future editors must not "clean up":
+      #   1. Keep SUPABASE_URL in the seed. It shadows the literal from
+      #      `[vars]` in wrangler.toml; dropping it flips the generated type
+      #      back to the string literal and `--check` fails again.
+      #   2. Only the KEY SET matters, not the values -- but adding or removing
+      #      a key also requires regenerating worker-configuration.d.ts.
+      # wrangler 4.116.0 has no flag to skip .dev.vars for `types`
+      # (`--env-file` only adds a file), so seeding is the only way in.
+      - name: Seed CI env bindings
+        run: |
+          cat > worker/.dev.vars <<'EOF'
+          CF_API_TOKEN=ci-placeholder
+          CF_ACCOUNT_ID=ci-placeholder
+          JWT_SECRET=ci-placeholder
+          SUPABASE_SECRET_KEY=ci-placeholder
+          SUPABASE_URL=ci-placeholder
+          EOF
+
       - name: Lint
         run: npm run lint
 

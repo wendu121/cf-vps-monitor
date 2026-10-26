@@ -1,164 +1,136 @@
-<!-- reviewed-by: independent-subagent (rev2: post-doc-fix) -->
-# 独立审议 (REVIEW) — 上游精选移植 B3「指标可用性」
+<!-- reviewed-by: independent-subagent (rev2: post-change) -->
+# 独立审议 (REVIEW) — CI Lint 修复（wrangler types --check 口径不一致）
 
-> 审议方：独立 `general-purpose` 子代理（主代理完成自审后另行起，未参与实现）。
-> 覆盖范围：工作区中 B3 全部改动（35 个已跟踪文件 + 1 个未跟踪迁移
-> `supabase/migrations/11_metric_availability.sql`）。
-> 结论：**PASS**，阻断项 0。
+> 审议方：独立 `general-purpose` 子代理（rev1 与 rev2 为不同实例，均未参与实现）。
+> 覆盖范围：`.github/workflows/ci.yml`（+26 行）、`VERIFICATION.md`。
+> 结论：**PASS**，阻断项 0。rev2 覆盖追加注释与两处措辞修正后的状态。
+
+## 改动摘要
+
+在 `Lint` 步骤之前新增 `Seed CI env bindings`：用 heredoc 写入只含 5 个键、值为
+`ci-placeholder` 的 `worker/.dev.vars`，使 CI 的 `wrangler types` 生成口径与已提交的
+`worker/worker-configuration.d.ts` 对齐。另有 16 行注释说明根因与两条防回归约束。
 
 ## 阻断项
 
 无。
 
-## 非阻断建议
+## rev1 非阻断建议与本轮处置
 
-1. **迁移 11 是未跟踪文件**：`git status` 显示 `?? supabase/migrations/11_metric_availability.sql`，
-   `git diff HEAD` 不含它，因此自审开头的「35 文件 / +1353 / −293，含 1 个新增迁移」措辞不准确——
-   该统计（排除 VERIFICATION.md 后复算正好 35 files / +1353 / −293）**不含**该未跟踪 .sql。
-   提交时必须显式 `git add supabase/migrations/11_metric_availability.sql`，否则 `git commit -am`
-   会漏掉迁移源文件（打包产物里虽有 SQL，但 `migration-signatures.test.mjs` 的源文件一致性会断裂）。
-2. **`git stash pop` 大概率冲突**：`stash@{0}`（boss 的 CF Tunnel WIP）同时改了
-   `scripts/generate-migrations.mjs`、`scripts/test-support/postgres.mjs`、
-   `worker/src/db/supabase-api/migration-signatures.test.mjs`、
-   `worker/src/generated/supabase-migrations.ts`。pop 后需保留双边：排序函数 + 迁移清单同时含 10 与 11，
-   并重跑 `node scripts/generate-migrations.mjs` 确认版本序列为 1..11。
-3. `frontend/src/utils/nodeMetrics.ts:21` `sumMetrics()` 零参数会走 `[].reduce` 抛 TypeError
-   （当前无零参调用点，纯防御性）。
-4. `agent/main.go:1836` 把 `cores` 初值由 1 改为 0（上游语义）：若 `cpu.Counts(true)` 在个别平台失败，
-   CPU 规格会从「1 核」变为缺省不显示。知情即可。
-5. `mergeMemorySnapshot` 删掉了 fork 原有的「`swapTotal > ramTotal*4` → 清零」启发式
-   （上游 `TestAuditSwapRespectsCgroupBeforeHostProc` 明确反对按 RAM 比例否决 swap）。
-   副作用：少数把宿主机 swap 镜像进 cgroup 的 LXC，现在会显示大 swap 而不是 0/—。
-   建议上线后抽查 1–2 台 LXC 节点的 swap 面板。
-6. 迁移 11 的 `cfm_load_metric_window_stats` 把 ram/disk 的 `else 0` 改成「算不出来即排除样本」
-   （`where metric_value is not null`）。与「不可用≠0」一致，但会改变负载告警的 `samples` 分母
-   （`ram_total=0` 的样本不再当 0% 计入），阈值统计口径有变化。
-7. `toPublicReport` 现在把 `cpu_capacity` 与 `metric_errors` 放进公开快照
-   （匿名 `/api/live/clients` 可见），会暴露容器 CPU 配额与「容器作用域不可用」判定。
-   与上游一致；私有 fork 若在意，可改为仅登录态返回。
+| # | 建议 | 处置 |
+|---|---|---|
+| 1 | 自审头部「新增 1 step + 11 行注释」与实测不符 | 已改为「`+26` 行 = 16 行注释 + 1 个 step（9 行正文 + 1 个空行）」，rev2 复算一致 |
+| 2 | 「推送 `63ac544` 后 CI 首次真正运行」口径不准 | 已改成「`63ac544` 本身无 run；Actions 打开后在其上的探测提交 `55a297d0` 触发首次 run；该 ref 的 ci.yml blob 为 `ad620e803b7e`，与修复前 HEAD blob 相同」，rev2 用 `gh api` 复核两处 blob 一致 |
+| 3 | 后人可能「清理」掉 `SUPABASE_URL` 导致再红 | 已在注释里写死该约束 |
+| 4 | 建议注明 wrangler 无跳过 `.dev.vars` 的开关 | 已写入注释 |
+| 5 | `worker/.dev.vars.example` 只列 2 键，与 5 键不一致 | **未采纳（本轮）**：属另一个文件的文档同步，留作待办 |
+| 6 | 三种替代方案评估 | 采纳其结论：保留现方案。理由见下 |
 
-## 实际执行过的核查
+### 替代方案评估（rev1 实测结论，未采纳）
 
-### 边界（是否夹带非 B3 改动）
+- **(i) 重新生成并提交 `worker-configuration.d.ts` 使其等于 CI 口径**：技术上可行，
+  rev1 实测换成该口径后 `tsc --noEmit` 仍 **0 error**（密钥访问走 `JwtEnv` 等结构化局部类型，
+  不依赖全局 `Env`）。但代价是 Env 契约里丢掉 5 个 secret 的文档性，且本地有 `.dev.vars`
+  时同样会红，收益仅为「CI 少一个 step」，不划算。
+- **(ii) 给 `wrangler types` 加 flag 忽略 dev vars**：wrangler 4.116.0 **无此开关**
+  （`--help` 全量列出：`--env / --env-file / --env-interface / --include-runtime /
+  --include-env / --strict-vars / --check`，`--env-file` 只能追加文件）→ 不可行。
+- **(iii) 从 lint 拿掉 `wrangler types --check`**：会丢掉「声明文件与配置漂移」这道闸，
+  而 B3 这类大改最容易踩，**不建议**。
 
-- `grep -rn verboseLogf agent/` → 0 命中；`agent/logging.go` 不存在；`logReport` 仍是 `log.Printf`
-  （`agent/main.go:3269`），GPU / WebSocket 日志仍用 `log.Printf`。
-- 与 `6ddadff:agent/main.go` 逐段对照：差异**只**在 logging（`verboseLogf`/log-file/verbose 旗标）、
-  `redactURLSecret`/`normalizeServerURL`/`requestErrorWithoutURL` 这些 fork 自有实现；
-  B3 逻辑与上游逐字相同。
-- `grep ClientSyncChange|next_cursor_key|device_ordinal worker/src/db/types.ts` → 0 命中；
-  `types.ts` 只改 `MonitorRecord` 9 个字段的可空性。
-- `NodeTable.tsx`：`MiniPingChart` 仍是静态 import，全文件无 `lazy`/`Suspense`
-  （`App.tsx`/`Index.tsx` 的 lazy 是既有代码，未动）。
-- 新增 Go 文件 `metric_availability.go`/`memory_scope.go`/`cgroup_cpu.go`/`audit_*.go`
-  与上游逐字相同（忽略 CRLF 后 `diff` 完全一致）。
+## rev1 实际执行过的核查
 
-### 迁移
+### 三组对照（先备份真实 `worker/.dev.vars`，全程未打印任何值；实验后 md5 与备份一致并还原；每个实验后 `git checkout -- worker/worker-configuration.d.ts`）
 
-- `generated/supabase-migrations.ts` 版本序列 → `1,2,3,4,5,6,7,8,9,11`，顺序正确。
-- `11_metric_availability.sql` 与上游 `8_metric_availability.sql` **逐字节相同**。
-- 10 条迁移的 sha256 与 generated 内 checksum 全部一致（bad=0）。
-- `grep -rln "cfm_insert_monitor_record|cfm_load_metric_window_stats"` → 仅 `4_rpc_api.sql` 与 `11`；
-  迁移 6–9 未改过这两个函数，不存在被静默覆盖的 fork 修复。`4` 里 `load` 的「显式 null 特判」
-  被 `11` 的 `case when input_record ? 'load' then ... else 0 end` 等价覆盖，未丢语义。
-- pglite 直连建库成功（本身即证明自然排序生效）；`information_schema` 查证 9 列 `is_nullable=YES`。
-- 直连调用 `cfm_insert_monitor_record`：`{cpu:null,ram:null,swap:null,load:null}` → 落库全 null；
-  `{}` 缺字段 → 全 0；`cfm_load_metric_window_stats` 对该 client `samples=1`（null 样本被排除）。
+| 条件 | `wrangler types` 生成结果 | md5 / 与 HEAD 比 | `--check` |
+|---|---|---|---|
+| a) 无 `.dev.vars` | 仅 `SUPABASE_URL: "https://PROJECT_REF.supabase.co"`（字面量）+ 2 个 DO 命名空间 | `94b70778…` ≠ HEAD `50efcfc8…` | **EXIT=1**（修复前必红的根因确认） |
+| b) 5 键占位 | 5 个 `string` 键 | `50efcfc8…` **== HEAD blob** | **EXIT=0** `up to date` |
+| c) 6 键（boss 本机真实） | 多一个 `SUPABASE_ACCESS_TOKEN` | ≠ HEAD | **EXIT=1** |
+
+附加发现：
+
+- **生成物只与键集有关、与值无关**——把 5 个值全换成 `x`，md5 仍一致。这意味着「少一个键」必崩。
+- **CRLF 陷阱**：`git checkout` 还原后工作区 d.ts 为 CRLF（14720 个 CR）时 `--check` 假失败 EXIT=1；
+  换成 LF 后同一命令 EXIT=0。CI 在 ubuntu 上检出 LF，不受影响。
+- 把 `frontend/dist` 临时移走（模拟 CI 在 Lint 阶段尚无 dist）后 `--check` 仍 `up to date` EXIT=0
+  → `[assets]` 缺失不影响 `wrangler types`。
+- 端到端：占位 `.dev.vars` + LF 的 d.ts 下 `cd worker && npm run lint` **EXIT=0**，`tsc` 无输出。
+
+### YAML 真实解析（非肉眼）
+
+临时 `pip install --target /tmp/pylibs pyyaml`（不碰全局、不改仓库），`yaml.safe_load` 成功；
+`jobs.verify.steps` 13 个，顺序 `… Install dependencies → Seed CI env bindings → Lint …`；
+取出的 `run` 与期望脚本 `==` 判定 True，逐行列号全为 0、`EOF` 在列 0（`run: |` 列 8、内容列 10）。
+该 step 的键只有 `['name','run']`。另把脚本落到临时沙箱 `bash` 执行 → EXIT=0，
+产物正是 5 行 `KEY=ci-placeholder`、LF 结尾。
+
+### 范围与副作用
+
+- `git diff -- .github/workflows/ci.yml`：单个 hunk，`+17 −0`（rev1 时点），只在 Lint 前插入；
+  顶层 `on/permissions/concurrency` 未在 diff 中。
+- `scripts/security-check.mjs` 全文 60 行只有 `npm audit` + `govulncheck`，**没有任何
+  git status / untracked 检查**；ci.yml 末尾 `git diff --exit-code` 只比 `supabase/` 与
+  `worker/src/generated/`。且 `git check-ignore -v worker/.dev.vars` → `.gitignore:17:.dev.vars*`，
+  该文件即使存在也不会出现在 status 里（实测生效）。
+- `npm ci` 不依赖 `.dev.vars`；`npm run build` 的 worker 段同样含 `wrangler types --check`，
+  因此这一步**同样被修好**；`generate-migrations.mjs` 不读 `.dev.vars`（全仓 grep 只命中 ci.yml 与注释）。
+- `npm test` 不受影响：miniflare 夹具用 `new Miniflare({ bindings: runtimeSecrets, … })` 显式注入，
+  构造器不会自动读 `.dev.vars`。
+- 键清单比对：`worker-configuration.d.ts` 的 `__BaseEnv_Env` 恰好 5 个字符串键 + 2 个 DO 命名空间，
+  `ProcessEnv` 的 `Pick<…>` 同 5 个 → 种子**不多不少正好 5 个，顺序一致**。
+- `package-lock.json` 只有一份 hoisted `wrangler@4.116.0`（root 无 wrangler 依赖，
+  workspaces = frontend/worker）→ CI 与本地同源、可复现。
 
 ### 自审真实性
 
-- `go build ./...` EXIT=0；`go vet ./...` EXIT=0；`go test -count=1 ./...` → `ok ... 32.267s`
-  （自审写 31.548s，机器抖动）。
-- worker `tsc --noEmit` EXIT=0；`node --test` → **531 / 531 pass / 0 fail**。
-- frontend `tsc -b` EXIT=0；`node --test` → **150 / 150 pass / 0 fail**；
-  `test/metric-availability.audit.test.mjs` 单跑 24/24；`test/audit-metric-availability-runtime.test.mjs`
-  单跑 1/1（7.5s，真实 pglite）。
-- VERIFICATION 行号抽查全部对得上：`main.go:170–177`（指针无 `omitempty`）、`3086–3090`（网络不可用早退）、
-  `3151–3153`（恢复时 `delete(MetricErrors,"network")`）、`main_test.go:1006–1012`（拼入
-  `metric_availability.go`）；声称的 4 个 Go 用例名都真实存在。
+8 条「已验证」逐条对得上（第 1 条 `gh run view 40299541754 --repo wendu121/cf-vps-monitor
+--log-failed` 由审议方亲自跑过，失败步骤 = `Lint`，日志尾部为
+`✘ [ERROR] Types at worker-configuration.d.ts are out of date…` + `exit code 1`）。
+如实披露到位：明确写「未在 GitHub 上真实验证该修复」「本地是模拟 CI 通过」，
+并主动写了「本地 Windows 的 `npm run lint` 仍会失败（CRLF + 第 6 个键）」。
 
-### 语义
+## rev2 增量复核（追加注释 + 两处措辞修正后）
 
-- 上游 `agent/audit_swap_scope_test.go:32-48` 确实断言
-  `unavailable container swap must remain unavailable instead of borrowing host totals`
-  →「清零假装 0」改为「标记不可用」有上游依据。
-- `grep swap_total|hasSwap` 全仓：前端只剩 DetailsGrid/NodeTable 展示（已改 `=== undefined` 判定，
-  null 显示 `—`）、`ClientInfo` 的元数据总容量（另一概念）、类型放宽；无遗漏的「swap 当 0」假设。
-- `publicHistory.ts:66-117` 不变量成立：`nullableNumberField`（null→保留、undefined/非有限数→丢整行），
-  9 个指标逐个判 undefined；`process_count/connections/connections_udp` 仍走 `numberField`+`allNumbers`，未被放松。
-- `grep mergeHistoryRecords|historyCursorFromRecord|next_cursor_key` → 0 命中；前端审计测试与上游差异
-  **只有**删掉 `id` 断言那 2 行（已披露），无其它 id 依赖。
+**1. YAML 仍合法、脚本字节未变**：PyYAML 解析成功，`steps` 13 个，
+`steps[4]` = `Seed CI env bindings`，键仍为 `['name','run']`；`run` 值与期望**逐字节相等**
+（181 字符），`EOF` 在列 0、结尾单个 `\n`、无 CRLF；位置 3 < 4 < 5
+（`Install dependencies` 之后、`Lint` 之前）。
 
-### 判别力反向验证（回退 → 跑 → 恢复，4 组）
+**2. 数字复算**：`git diff --stat` → `1 file changed, 26 insertions(+)`；`--numstat` → `26 / 0`
+（0 删除）。分类：`#` 注释 **16** 行，其余 **10** 行（`- name:` / `run: |` / `cat` / 5 键 / `EOF` / 1 空行）
+= 9 行正文 + 1 空行 → 与 VERIFICATION.md 表述完全对得上。
 
-| 回退点 | 测试 | 结果 |
-|---|---|---|
-| worker `toMonitorRecord` 的 `cpu: report.cpu` → `report.cpu \|\| 0` | monitor-report.metric-availability.audit | **12 pass / 1 fail**（cpu 那条） |
-| worker `toPublicReport` 删掉 `Object.assign(result, selectMetricAvailability(...))` | 同上 | **11 pass / 2 fail** |
-| frontend `nullableNumberField` 的 `null → null` 改成 `null → undefined`（退回丢整行） | publicHistory.load-unavailable + 前端审计 | **15 pass / 10 fail** |
-| frontend `buildMonitorChartData` 的 `cpu: cpu===null ? null` 改成 `? 0` | 前端审计 | **23 pass / 1 fail**（缺失缺口用例） |
+**3. blob 口径**：`git rev-parse HEAD:.github/workflows/ci.yml` 与
+`gh api contents/.github/workflows/ci.yml?ref=55a297d0 --jq .sha` 均为
+`ad620e803b7e4fc24197a9f8bf75dfa5bb994453` → 「`55a297d0` 的失败结论适用于本修复」成立。
 
-每组回退都立刻变红 → 测试有判别力，不是恒真。恢复后复跑：worker 13/13、frontend 25/25 全绿；
-`git status` 仍为 37 行、`git diff --name-only` 与审查开始时一致，实验未留残留。
+**4. 改动范围**：`git status --short` 10 个 `M` + 2 个 `??`，本轮相关仅 `ci.yml` 与
+`VERIFICATION.md`；其余 8 个 M + 2 个 `??` 确为 boss 的 CF Tunnel WIP，未被动。
+ci.yml diff 仅 1 个 hunk、0 删除行 → 无从改到 `on`/`permissions`/`concurrency`。
 
-### 测试是否被削弱
+**rev2 结论**：`PASS`，阻断项 0。
 
-- 4 个 Go 测试改动全是机械类型适配（`CPU: float64Metric(17)` 等），断言保留原值
-  （如 `*report.NetOut != 40`），无 `ok(x!==undefined)` 之类放松。
-- `publicHistory.load-unavailable.test.mjs` 由「cpu null 应丢整行」改为「保留行且 cpu=null」+
-  新增「cpu 字符串仍丢整行」，属于加强。
-- `website-migration.reaudit.test.mjs` 的 `applied===9 → BUNDLED_SUPABASE_MIGRATIONS.length`
-  与上游逐字相同，非本地自选放松。
-- 两个新增 worker 审计测试与上游逐字相同。
+## 未复核项（两轮合并）
 
-## 未复核项
+- **真实 GitHub CI 是否转绿**：两轮审议期间均未 push，无法验证。这条只能由推送后
+  `gh run watch` 收口，是本次修复唯一算数的证据。
+- **Lint 之后的步骤**：`build`（vite + build:migrations）、`npm test`（全仓 `node --test`
+  + `go test`）、两个 `sudo` 权限步骤、`security:check`、`Check migration drift`
+  在 CI 上的表现均未实测。
+- **Actions 官方 schema 级校验**：环境无 actionlint，用 PyYAML 解析 + 沙箱真实执行，
+  能证明缩进剥离与 shell 语义正确，但不等价于 GitHub 的 workflow schema 校验。
+- **根目录完整 `npm run lint` 的 frontend 段**未重跑（`CFAssets.tsx` 是 boss WIP，
+  跑出来不代表本轮）；作为替代，从 CI 失败日志确认 frontend 的 `tsc -p tsconfig.json --noEmit`
+  在修复前就是通过的。
+- **boss 的 CF Tunnel WIP 本身**（8 M + 2 ??）正确性不在本轮范围，未审。
+- **非 Ubuntu runner / macOS 行为**未验证（workflow 仅配 `ubuntu-latest`，实际风险为零）。
 
-- 未跑 `wrangler types --check` / `wrangler deploy --dry-run`，未对真实 Supabase 执行迁移
-  （`notify pgrst, 'reload schema'` 的真实 PG 行为未验）。
-- 未跑 `vite build`（只跑 `tsc -b`，未验证 Vite 对 `./format.ts`、`./nodeMetrics.ts` 带扩展名导入的实际打包）。
-- 未在真实 LXC / lxcfs / 受限 cgroup 主机上验证 `procFileIsLXCFS`、`readCgroupCPU`、swap 不可用判定，
-  仅 fixture 与单测层面。
-- 未做真实 Windows 服务安装/升级冒烟；未在真实 CF Durable Object 上验证冷启动持久化
-  （runtime 测试走 miniflare + pglite）。
-- 未跑 `frontend/browser/*.mjs` 浏览器审计脚本（上游该文件未移植）。
-- 未验证「老 Agent（缺字段）→ 服务端按 0 存」的**端到端**路径，只分层验证了
-  `normalizeMonitorReport` 与 SQL 函数。
+## 遗留待办（非阻断）
 
-## §6 Post-PASS 增量复核（rev2）
-
-**触发原因**：上节「非阻断建议 #1」指出自审开头把未跟踪的 `11_metric_availability.sql` 算进了
-`git diff` 的 35 文件统计，措辞不准确。主代理据此只改了 `VERIFICATION.md` 开头一段（未动任何代码）。
-
-**rev2 审议方**：另一位独立 `general-purpose` 子代理（与前一轮审议员不同的实例），范围限定为该处措辞。
-
-### 核查与结论
-
-1. **数字核对**：`git diff --stat HEAD -- . ':!VERIFICATION.md' ':!REVIEW.md'`
-   → `35 files changed, 1353 insertions(+), 293 deletions(-)`，与新表述「已跟踪文件 35 个 / +1353 / −293」
-   逐字吻合。全量 `git diff --stat HEAD` → `37 files changed, 1565 insertions(+), 451 deletions(-)`，
-   37 = 35 + 2，反证「不含两个文档」的括注必要且正确。
-2. **未跟踪迁移核对**：`git status --porcelain | grep '^??'` 仅一行
-   `?? supabase/migrations/11_metric_availability.sql`（4480 字节，盘上确实存在）。
-   「`git commit -am` 会漏掉它」成立——`-a` 只覆盖已跟踪文件的修改。
-3. **开头段其余引用**：`git log --oneline -1 a092297` 确为 B1+B2 提交；`git stash list` 的
-   `stash@{0}` 描述与自审一致（8 个文件）。rev2 指出一处**轻微不精确**：`10_cf_tunnel_domains.sql`
-   实际未出现在 `git stash show --name-only stash@{0}` 列表中（它在 stash 的未跟踪部分），
-   自审把它写进 stash 括注属列举不精确，不构成事实错误，不影响结论。
-4. **「差异只改了开头一段」的方法论说明**：`git diff -- VERIFICATION.md` 无法证明这一点——
-   HEAD 里的 VERIFICATION.md 仍是 B1+B2 版（blob `31b91d5`），B3 稿从未进过 index 或 commit，
-   git 只能给出「整份重写」。改用两组替代证据：
-   - **时间戳隔离**：`find . -newer VERIFICATION.md` 为空，即该文件是全仓最新；最近的源码改动是
-     `worker/src/utils/monitor-report.ts`（16:43:50），rev2 这一步（17:00:04）之后无任何源码被写。
-   - **正文引用抽查**：`main.go:170-177`（裸指针 + omitempty 组合）、`main.go:3086`（网络不可用早退）、
-     `main.go:3152`（`delete(MetricErrors,"network")`）、`main_test.go:1006-1012`（拼入
-     `metric_availability.go`）行号全部未位移，表格结论未被波及。
-
-**rev2 结论**：`PASS`。新表述与实测一致，未引入新的不准确之处，也未波及正文结论、数字或表格行。
-rev2 建议保留该写法。
-
-### rev2 非阻断观察
-
-- 自审「仅属于 B3 的改动」严格说包含 `scripts/generate-migrations.mjs` 等 4 处自然排序修复，
-  那是 B3 暴露出的独立缺陷修复，VERIFICATION 第二节已如实交代，措辞可接受。
-- `REVIEW.md` 同为相对 HEAD 的整份重写且未提交，属 rev1 审议员写入，不涉及本次措辞修正。
-
+- `worker/.dev.vars.example` 只列 `SUPABASE_SECRET_KEY` / `JWT_SECRET` 两键，与已提交
+  d.ts 的 5 键不一致。建议补一句「增删键必须同步修改 ci.yml 的 `Seed CI env bindings`
+  并重新生成 `worker-configuration.d.ts`」。
+- 本地 Windows 的 `npm run lint` 仍会因 CRLF + 第 6 个键（`SUPABASE_ACCESS_TOKEN`）失败。
+  若想让本地也绿，可考虑给 `.gitattributes` 加 `worker/worker-configuration.d.ts text eol=lf`
+  并从本地 `.dev.vars` 摘掉多余键；属本地开发体验问题，不在本轮目标内。
