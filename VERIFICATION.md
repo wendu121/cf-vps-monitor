@@ -167,6 +167,12 @@ hono 4.13.14 · postcss-selector-parser 6.1.4 · miniflare 4.20260730.0 · wrang
 - **lock 一致性**：`npm ci --dry-run` → EXIT=0。
 - **依赖树**：`npm ls` 无 `invalid` / `UNMET` / `extraneous`。
 - **Go**：`go build` / `go vet` / `go test` 全部 EXIT=0（`ok 31.044s`）。
+  **在 `828f68c` 干净 worktree 复验**（自动拉到 `go1.26.10 windows/amd64`）：
+  `BUILD=OK` / `VET=OK` / `ok github.com/cf-vps-monitor/agent 31.903s`，EXIT=0 ——
+  确认升到 1.26.10 后测试仍全绿，不是靠本地旧版工具链蒙过。
+- **lock 的平台完整性**：`npm ci --dry-run --os=linux --cpu=x64` → **EXIT=0**，
+  382 个包可解析，日志里包含 `@cloudflare/workerd-linux-64` 等 Linux 专属包，
+  说明重写后的 lock 在 CI 的目标平台上条目齐备。
 - **TypeScript**：worker `tsc --noEmit` 0 错；frontend `tsc --noEmit` 0 错。
 - **JS 测试**：worker **532/532**；frontend **150/150**。
 - **构建**：`vite build` EXIT=0（`✓ built in 20.84s`）。
@@ -186,9 +192,22 @@ hono 4.13.14 · postcss-selector-parser 6.1.4 · miniflare 4.20260730.0 · wrang
 
 - **真实 GitHub CI 是否转绿：未 push，无法验证。** 须推送后由 `gh run watch` 收口。
 - **`Check migration drift` 仍将首次真正执行**（此前每轮都被 security 挡在前面）。
-  本地在干净 `git worktree` 上预演过（`Generated 10 migrations` + `git diff --quiet` = 0）。
-- **`Agent data race check` 会用 go 1.26.10 重跑**，本地未跑 `-race`（耗时），
-  只验证了普通 `go test`。
+  已用 `git worktree add` 建 **`828f68c` 的干净快照**预演（避开 boss 未提交的
+  `10_cf_tunnel_domains.sql` 与改过的 `generate-migrations.mjs` 污染）：
+  `Generated 10 Supabase migrations`（EXIT=0）+ `git diff --exit-code -- supabase/
+  worker/src/generated/` **EXIT=0**；再加 `-c core.autocrlf=false` 模拟 Linux 语义复验，
+  仍 EXIT=0，且生成物为纯 LF。
+  补充说明：本地 `git status` 会把 `supabase-migrations.ts` 显示为 `M`，
+  那是 `core.autocrlf=true` 的行尾假象 —— 归一化后 diff 为空，CI 上不会出现。
+- **`Agent data race check` 本地无法执行，只能靠真实 CI**。实测原因是环境缺 C 编译器，
+  与代码无关：
+  ```
+  $ CGO_ENABLED=1 go test -race -run '^$' ./...
+  cgo: C compiler "gcc" not found: exec: "gcc": executable file not found in %PATH%
+  FAIL  github.com/cf-vps-monitor/agent [build failed]
+  ```
+  本地只验证了无 `-race` 的 `go build` / `go vet` / `go test`（见下）。
+  该步骤在 CI 的 `ubuntu-latest` 上才具备 CGO 条件，本轮为其首次以 go 1.26.10 运行。
 - **基线是有意为之的「已知不良状态」**：它让 4 条遗留漏洞得以长期存在。
   这是 boss 在「不升 tailwind major / 不动前端样式体系」前提下的选择，
   代价是这些风险只靠 `followUp` 字段跟踪，没有强制到期机制。
