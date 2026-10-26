@@ -72,7 +72,8 @@ package-lock.json agent/go.mod agent/go.sum` 此前为空）。
 
 `miniflare` 的 `via` 是 `sharp` / `undici`，`wrangler` 的 `via` 是 `miniflare`（间接）——
 两者本身都没有独立 advisory，属**传递标记**，修好上游即自动从报告中消失
-（升级后实际核对：报告里只剩 4 个包，`miniflare` / `wrangler` 已不在其中）。
+（升级后实际核对：报告里只剩 **2 个包**（`vite` 与 `postcss-selector-parser`，
+对应 6 条 advisory），`miniflare` / `wrangler` 已不在其中）。
 **因此没有升级 wrangler** —— 升到 4.152.0 会改变 `wrangler types` 的生成口径，
 反而推翻上一轮修好的 Lint。
 
@@ -304,7 +305,8 @@ rolldown 1.0.3 · lightningcss 1.32.0 · wrangler 4.116.0 · hono 4.13.14
   `collectAdvisories` 只对**对象型** `via` 做 unmapped 判定；**字符串型** `via`
   （语义是"漏洞属于上游那个包"）会被直接跳过，且不校验该包是否真在报告里。
   rev4 用构造报告 `{基线内 moderate} + {ghost-holder: critical, via: ["ghost-pkg"]}`
-  实测 `exit 0`。真实 `npm audit` 的字符串 `via` 始终指向报告内存在的包
+  实测 `exit 0`（该结果来自**构造报告 + 注入 run**，不是真实 `npm audit` 输出）。
+  真实 `npm audit` 的字符串 `via` 始终指向报告内存在的包
   （改前 `miniflare via ["sharp","undici"]`、`wrangler via ["miniflare"]` 均成立），
   所以**当前不可达**。作为纵深防御建议加一条不变量：字符串 `via` 必须命中
   `report.vulnerabilities` 的某个 key，否则按 unmapped 处理 —— 本轮未做，留作后续。

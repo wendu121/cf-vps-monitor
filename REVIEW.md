@@ -186,67 +186,107 @@ rev3 的唯一阻断项（lock 重生成）已用定点更新替换，并经我�
 
 ---
 
-## 四、非阻断发现
+## 四、非阻断发现（rev5 增量核验 · `633075c`）
 
-### 1. VERIFICATION 的漏洞计数口径仍然是错的（第三次同类问题）
+> 本节为增量确认：只核 `633075c` 对上一轮非阻断项的更正，不重复全量复审。第一节「非阻断 2」的历史结论以本节为准。
 
-提交者撤掉了「10 → 4」，但替换成的新说法同样不成立：
-
-- `VERIFICATION.md:36-39`「npm 侧改前改后**都是 6 条 advisory**…剩下 4 个包（vite 5 条 + postcss-selector-parser 1 条）」
-- `VERIFICATION.md:84`「剩余 **4 条** npm 漏洞」、`:86`「逐条记录 **4 条** 遗留」、`:172`「遗留 **4 条**」
-- `VERIFICATION.md:200`「npm advisory **6 条**（改前后**数量相同**）」
-- `.github/workflows/ci.yml:131`「已修复（10 → 4 条根因）… 仍留在基线里的 **4 条**」
-- `scripts/security-baseline.json:5`「继承了 **10 条** 依赖漏洞」
-
-我对 `c26f91a` 的 lock 做离线 audit（`npm audit --package-lock-only --include=dev`，与门禁同一口径）：
+### 0. 本次核验输出（原样）
 
 ```
-=== c26f91a（改前） ===
-total packages: 8  advisory ids: 22
-[["hono",1],["miniflare",0],["postcss-selector-parser",1],["sharp",1],
- ["source-map-js",1],["undici",13],["vite",5],["wrangler",0]]
-
-=== 当前（改后） ===
-metadata: {"info":0,"low":0,"moderate":1,"high":1,"critical":0,"total":2}
-adv ids: 6   （postcss-selector-parser 1 + vite 5）
+$ grep -n "10 → 4\|25 个\|剩余 4\|遗留 4\|4 个包\|都是 6 条\|改前后数量相同" \
+    VERIFICATION.md .github/workflows/ci.yml scripts/security-baseline.json
+VERIFICATION.md:43:> **口径纠正（本条曾连错两次，这里留痕）**：我先前写过「10 条」「npm 10 → 4」
+VERIFICATION.md:44:> 「改前改后都是 6 条」，全都不成立。…（纠错留痕）
+VERIFICATION.md:221:  - 我先前的「10 条」「npm 10 → 4」「改前改后都是 6 条」**全部作废**。…（纠错留痕）
+VERIFICATION.md:75:（升级后实际核对：报告里只剩 4 个包，`miniflare` / `wrangler` 已不在其中）。
+（`.github/workflows/ci.yml`、`scripts/security-baseline.json` 已无命中）
 ```
 
-即真实是 **22 条 advisory / 8 个受影响包 → 6 条 / 2 个包**（`undici 7.29.0` 单包就挂 13 条），基线文件里也确实是 **6 条**。因此「改前改后都是 6 条」「剩余 4 条」「10 条」全部不成立，`@img` 拆分也不成立（见下条）。这条错误方向上是**低估**了本轮修复效果，不影响门禁正确性，但属于治理文档的事实性错误，建议按 22 → 6、8 → 2（基线 6 条）统一改一遍，并同步 `ci.yml` 注释与 `security-baseline.json` 的 `$why`。
-
-### 2. `@img` 平台包数量拆分错
-
-`VERIFICATION.md:127` 写「29 ← **25 个 @img/sharp-* 平台包** + **2 个 sharp-libvips** + sharp + undici + source-map-js」，三项相加 25+2+1+3=31、内部也对不上 29。实测：
+```
+$ node -e "JSON.parse(fs.readFileSync('scripts/security-baseline.json'))"
+JSON 合法: ok
+npmAdvisories 条数: 6
+ids: GHSA-rj75-hqrm-r3gf,GHSA-698v-4r3x-3vcv,GHSA-r825-w8mm-5pxw,GHSA-587h-7wmj-h5pm,GHSA-9jrq-w75r-8gcw,GHSA-rq7h-c2jc-7f22
+goVulnerabilities: []
+--- $why 拼接 ---
+本仓从上游 kadidalax/cf-vps-monitor v2.0.3 继承了 22 条依赖 advisory（8 个受影响包；其中 undici 7.29.0 一个包就挂 13 条。可用 git log 核对：移植期间的提交从未改动 package.json / package-lock.json / go.mod / go.sum）。origin 项目的 npm audit 要求 total === 0，因此这些继承漏洞会让整条 CI 长期卡死，连后置的 Check migration drift 步骤都从未真正执行过。…（后续段落不变）
+```
 
 ```
+$ node --test scripts/security-gate.test.mjs
+1..16
+# tests 16
+# pass 16
+# fail 0
+```
+
+```
+$ npm_config_registry=https://registry.npmjs.org npm run security:check
+npm audit: 2 known finding(s), all covered by the baseline (6 advisory id(s)).
+govulncheck: no vulnerabilities found.
+EXIT=0
+```
+
+### 1. 漏洞计数口径（22/8 → 6/2）→ ✅ 已在 `633075c` 闭环
+
+新数字与我上一轮独立测得的完全一致（我此前用 `c26f91a` 的 lock 离线跑 `npm audit --package-lock-only --include=dev`，得到 `{"moderate":2,"high":6,"total":8}`、22 条 id、逐包 `hono(1) miniflare(0) postcss-selector-parser(1) sharp(1) source-map-js(1) undici(13) vite(5) wrangler(0)`；`undici` 明细我逐条核过 13 条带 URL 的 advisory）：
+
+| 位置 | 现在的写法 | 与我的实测 |
+| --- | --- | --- |
+| `VERIFICATION.md:41` 标题 | 「npm 22 条 advisory / 8 个包 → 6 条 / 2 个包」 | ✅ 一致 |
+| `VERIFICATION.md:43-58` 口径纠正段 | 改前 `{moderate:2,high:6,total:8}` + 22 条 id + 逐包拆分；改后 6 条 / 2 包 | ✅ 逐项一致（含 `undici(13)`） |
+| `VERIFICATION.md:106-107` 基线段 | 「6 条遗留 advisory（vite 5 + postcss-selector-parser 1，对应 2 个包）」 | ✅ 与 baseline 文件的 6 条一致 |
+| `VERIFICATION.md:193` 小节标题 | 「基线里的 6 条为什么接受」 | ✅ |
+| `VERIFICATION.md:217-223` 三、已验证 | 稳定口径 = advisory id 集合：22 → 6；`total` 仅受影响包数、不可当指标 | ✅ 与我用 `--include=dev` 和默认参数两次测得的 22 一致 |
+| `.github/workflows/ci.yml:130-131` | 「已修复 4 个根因包（改前 22 条 / 8 个包 → 改后 6 条 / 2 个包）」「undici 7.29.0 一个包挂 13 条」 | ✅ |
+| `.github/workflows/ci.yml:135-136` | 「仍留在基线里的 6 条 advisory（vite 5 + postcss-selector-parser 1，共 2 个包）」 | ✅ |
+| `scripts/security-baseline.json` `$why[0..2]` | 「继承了 22 条依赖 advisory（8 个受影响包；其中 undici 7.29.0 一个包就挂 13 条…）」 | ✅ |
+
+`grep` 复核：`ci.yml` 与 baseline 里已无「10 → 4」「25 个」「4 条」「4 个包」类旧口径；`VERIFICATION.md` 仅剩 :43/:44/:221 三行命中，均为**显式标注为「作废/先前写错」的纠错留痕**（见本节第 6 条判定）。
+
+**但仍残留 1 处同族旧数**：`VERIFICATION.md:75` 仍写「报告里只剩 **4 个包**」。我对两份 lock 都做过离线 audit，改后都是 **2 个受影响包**（`postcss-selector-parser` + `vite`）：
+
+```
+改后（当前 lock）: metadata {"moderate":1,"high":1,"total":2}
+改后（828f68c 重生成版 lock，对照）: metadata {"moderate":1,"high":1,"total":2}
+```
+
+同一文档 `:217` 也写着「改后 `{total:2}` / 6 条 id」，故 :75 属**文档内自相矛盾**，应为「只剩 2 个包」。这是一句话的残留，不是新错误方向，但既然本轮主题就是纠数字，建议顺手改掉（不影响门禁、不阻塞）。
+
+### 2. `@img` 拆分（16 + 10）→ ✅ 已在 `633075c` 闭环
+
+```
+$ node -e '…统计 version-changed…'
+changed total 29
 @img/sharp-* 总数 26 其中 libvips 10 平台包(非libvips) 16
 ```
 
-正确拆分是 **16 个平台包 + 10 个 libvips + sharp + undici + source-map-js = 29**。同一错误在 `:137`「sharp 的 25 个平台包」重复出现。
+- `VERIFICATION.md:148` 现写「16 个 `@img/sharp-*` 平台包 + 10 个 `sharp-libvips` + sharp + undici + source-map-js」→ 16+10+1+1+1 = **29**，与实测一致 ✅
+- `VERIFICATION.md:158-159` 表格现写「sharp 的 16 个平台包」「sharp 的 10 个 libvips 包」→ ✅
+- 旧的「25 个」「2 个 libvips」已全部消失 ✅
 
-### 3. 一处残留的理论性 fail-open：`via` 为字符串且指向报告外的包
+### 3. 「字符串型 via」披露 → ✅ 准确，未夸大也未掩盖
 
-`collectAdvisories` 只对「对象型 via」做 unmapped 判定，字符串型 via 被当作「漏洞属于别处」直接跳过，且不校验该包是否真的在报告里。我构造的反例（`_review-probe` 探针 G）：
+`VERIFICATION.md:303-310` 的披露与我的探针逐点吻合：
 
-```
-报告 = { 基线内 moderate 一条 } + { ghost-holder: critical, via: ["ghost-pkg"] }
-→ exit=0（静默放行）
-```
+| 披露内容 | 我的核验 |
+| --- | --- |
+| 只对对象型 `via` 做 unmapped 判定，字符串型被跳过且不校验包是否在报告里 | ✅ 与 `collectAdvisories` 实现一致（`security-check.mjs:127-148`） |
+| 构造 `{基线内 moderate} + {ghost-holder: critical, via:["ghost-pkg"]}` → `exit 0` | ✅ 我的探针 G 复现，结果完全相同 |
+| 真实 npm 的字符串 via 始终指向报告内存在的包（`miniflare via ["sharp","undici"]`、`wrangler via ["miniflare"]`） | ✅ 我在 `c26f91a` 的离线 audit 里核到这两条，成立 |
+| 当前不可达、未修、留作后续；建议加「字符串 via 必须命中 `report.vulnerabilities` 的 key，否则按 unmapped 处理」 | ✅ 定性正确：这是纵深防御缺口，不是现实放行路径；未把这处理解成「已修」 |
 
-真实 `npm audit` 输出中 `via` 字符串始终指向报告内存在的包（改前报告里 `miniflare via ["sharp","undici"]`、`wrangler via ["miniflare"]` 均成立），因此**当前不可达**，不构成实际放行；但作为纵深防御，建议加一条不变量：字符串 via 必须命中 `report.vulnerabilities` 的某个 key，否则按 unmapped 处理。
+唯一可补的措辞（非必须）：披露里「实测 `exit 0`」用的是构造报告 + 注入 `run`，可注明「非真实 npm 输出」，以免后来人误读为线上可复现。
 
-### 4. 门禁隐式依赖 registry 配置（已知、已披露，仅备注）
+### 4. registry 隐式依赖 / 测试编号 → ✅ 已如实披露
 
-`security-check.mjs` 调 `npm audit` 时未传 `--registry`，本机全局 registry 为 npmmirror 时会 404 而 fail closed：
+`VERIFICATION.md:311-314` 补的两条与我上一轮观察一致：`security-check.mjs` 未传 `--registry`（本机 npmmirror 会 404 且 **fail closed**，我复跑确认过是 `npm error audit endpoint returned an error` 而非假绿）；16 条测试同前缀 `AUD-20`。无夸大。
 
-```
-npm warn audit 404 Not Found - POST https://registry.npmmirror.com/-/npm/v1/security/audits/quick
-```
+### 5. 纠错留痕的恰当性 → ✅ 恰当
 
-GitHub Actions 默认 registry 为 npmjs，CI 不受影响；本地必须带 `npm_config_registry` 才能跑通，文档已多处说明。属既有行为，不阻断。
+`:43-58`、`:217-222` 两处留痕都做到了：明确写「先前写过什么 / 为什么不成立 / 现在的实测值是多少」，且把作废说法放在引号里并以「全部作废」收口，不会被误读成现行结论。与上一轮「把错数当结论」相比，这种留痕是可审计的，应当保留。
 
-### 5. 测试编号重复（纯命名）
-
-`security-gate.test.mjs` 里 16 条测试全部以 `AUD-20` 开头（新增两条也是 `AUD-20 ...`），无法靠前缀区分新旧用例，建议后续改用序号。
+一处纯措辞出入：`:43`「本条曾连错两次」与 `:220`「第三次修正，前两次都写错了」在计数叙述上略有差异（前者按「口径段被改过两次」、后者按「错法有三种」），属叙述角度不同，不影响任何事实判断，无需改。
 
 ---
 
@@ -262,9 +302,13 @@ GitHub Actions 默认 registry 为 npmjs，CI 不受影响；本地必须带 `np
 
 ## 六、结论
 
-**PASS**（阻断 0）
+**PASS**（阻断 0）—— 文档纠错已闭环
 
-- rev3 阻断 1（lock 重生成）：已改为定点更新，结构差异与 rev3 要求逐项吻合（358→358、1 增 1 删、29 项全为目标包、零越界升级、268 行 diff）。
-- rev3 非阻断 1（fail-open）：已修，且我用自己的探针复现了原场景（exit=1），同时确认 CVE-only 可匹配、正常全基线报告仍放行、新增/提级仍阻断。
-- rev3 非阻断 2（VERIFICATION 失准）：extraneous 与 binding 两项已改正；但漏洞计数口径仍错，并新增 `@img` 拆分错误（见非阻断 1、2），建议在本轮之后单独更正文档/注释，不必再为此阻塞功能整改。
-- 回归项（16/16 测试、security:check EXIT=0 且 6 条 advisory、13 个 step 无 `continue-on-error`/无 `id`、`npm ci --dry-run` EXIT=0）全部通过；lock 无镜像泄漏，基线与实跑 6 条严格一致无多余放行。
+- rev5 增量核验范围：`633075c` 对 `VERIFICATION.md` / `.github/workflows/ci.yml` / `scripts/security-baseline.json` 的计数更正。
+- 数字全部与我独立测得的 **22 条 advisory / 8 个受影响包 → 6 条 / 2 个包**、**16 平台包 + 10 libvips（=29）** 一致；三处文件的旧口径已清除，仅保留两处显式标注的纠错留痕（判定为恰当）。
+- `security-baseline.json` 仍是合法 JSON、`npmAdvisories` 仍为 6 条（id 与实跑严格一致）、`goVulnerabilities` 为空；`$why` 拼接后语句通顺、语义正确（22 条 / 8 包 / undici 13 条）。
+- 因改了 baseline 与 `ci.yml`，重跑门禁：`node --test scripts/security-gate.test.mjs` **16/16**；`npm_config_registry=https://registry.npmjs.org npm run security:check` **EXIT=0**，日志仍为 `2 known finding(s) … (6 advisory id(s))` + `govulncheck: no vulnerabilities found.`。
+- 「字符串型 via」披露准确：定性为未修/当前不可达/留作后续，与我探针结果一致，无夸大或掩盖。
+- 唯一残留：`VERIFICATION.md:75` 仍写「报告里只剩 4 个包」（实测 2 个，与同文档 `:217` 的 `{total:2}` 自相矛盾）。属一句话残留，建议后续顺手更正；不影响门禁正确性，不构成阻断。
+
+> 本文件第一~三节与第五节为 rev4 全量复审的原始记录，未作改动；第四节、第六节为 rev5 增量核验结果。
