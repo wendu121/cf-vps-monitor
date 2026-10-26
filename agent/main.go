@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -29,7 +30,6 @@ import (
 	"github.com/shirou/gopsutil/v3/disk"
 	"github.com/shirou/gopsutil/v3/host"
 	"github.com/shirou/gopsutil/v3/load"
-	"github.com/shirou/gopsutil/v3/mem"
 	gnet "github.com/shirou/gopsutil/v3/net"
 	"github.com/shirou/gopsutil/v3/process"
 )
@@ -167,12 +167,14 @@ type BasicInfo struct {
 }
 
 type Report struct {
-	CPU       float64 `json:"cpu"`
-	GPU       float64 `json:"gpu"`
-	RAM       int64   `json:"ram"`
-	RAMTotal  int64   `json:"ram_total"`
-	Swap      int64   `json:"swap"`
-	SwapTotal int64   `json:"swap_total"`
+	CPU          *float64          `json:"cpu"`
+	GPU          float64           `json:"gpu"`
+	RAM          *int64            `json:"ram"`
+	RAMTotal     *int64            `json:"ram_total"`
+	Swap         *int64            `json:"swap"`
+	SwapTotal    *int64            `json:"swap_total"`
+	CPUCapacity  *float64          `json:"cpu_capacity,omitempty"`
+	MetricErrors map[string]string `json:"metric_errors,omitempty"`
 	// Load 为空指针表示「本机负载不可取信」（例如 lxcfs 未虚拟化 loadavg 的 LXC
 	// 容器，/proc/loadavg 直接透传宿主机数值）。序列化成 null，服务端据此跳过负载告警。
 	// 不能报 0——0 会被读成「空闲」，比报错值更误导。
@@ -184,10 +186,10 @@ type Report struct {
 	DiskTotal           *int64               `json:"disk_total"`
 	DiskSource          string               `json:"disk_source,omitempty"`
 	DiskSampledAt       int64                `json:"disk_sampled_at,omitempty"`
-	NetIn               int64                `json:"net_in"`
-	NetOut              int64                `json:"net_out"`
-	NetTotalUp          int64                `json:"net_total_up"`
-	NetTotalDown        int64                `json:"net_total_down"`
+	NetIn               *int64               `json:"net_in"`
+	NetOut              *int64               `json:"net_out"`
+	NetTotalUp          *int64               `json:"net_total_up"`
+	NetTotalDown        *int64               `json:"net_total_down"`
 	ProcessCount        int                  `json:"process_count"`
 	Connections         int                  `json:"connections"`
 	ConnectionsUdp      int                  `json:"connections_udp"`
@@ -230,6 +232,8 @@ type memorySnapshot struct {
 	swapTotal uint64
 	hasRAM    bool
 	hasSwap   bool
+	// Set only after checking the mount covering this exact proc file.
+	procContainerScoped bool
 }
 
 type GPUInfo struct {
@@ -1829,9 +1833,19 @@ func readCPUBasicInfo() (string, int) {
 			cpuName = name
 		}
 	}
-	cores := 1
+	cores := 0
 	if count, err := cpu.Counts(true); err == nil && count > 0 {
 		cores = count
+	}
+	if runtime.GOOS == "linux" && isLinuxContainer() {
+		cores = 0
+		if snapshot := readCgroupCPU("/sys/fs/cgroup", "/proc/self/cgroup"); snapshot.capacity > 0 {
+			cores = int(math.Ceil(snapshot.capacity))
+		} else if procFileIsLXCFS("/proc/cpuinfo", "/proc/self/mountinfo") {
+			if count, err := cpu.Counts(true); err == nil && count > 0 {
+				cores = count
+			}
+		}
 	}
 	return cpuName, cores
 }
@@ -1855,56 +1869,30 @@ func readCPUNameFromProc(path string) (string, error) {
 
 func readMemorySnapshot() memorySnapshot {
 	snapshot := memorySnapshot{}
+	containerized := false
 	if runtime.GOOS == "linux" {
+		containerized = isLinuxContainer()
 		procMem, _ := readProcMeminfo("/proc/meminfo")
+		procMem.procContainerScoped = procFileIsLXCFS("/proc/meminfo", "/proc/self/mountinfo")
 		cgroup := readCgroupMemory("/sys/fs/cgroup", "/proc/self/cgroup")
-		snapshot = mergeMemorySnapshot(procMem, cgroup, isLinuxContainer())
+		snapshot = mergeMemorySnapshot(procMem, cgroup, containerized)
 	}
-	if !snapshot.hasRAM {
-		if memInfo, err := mem.VirtualMemory(); err == nil {
-			snapshot.ramUsed = memInfo.Used
-			snapshot.ramTotal = memInfo.Total
-			snapshot.hasRAM = true
-		}
-	}
-	if !snapshot.hasSwap {
-		if swapInfo, err := mem.SwapMemory(); err == nil {
-			snapshot.swapUsed = swapInfo.Used
-			snapshot.swapTotal = swapInfo.Total
-			snapshot.hasSwap = true
-		}
-	}
-	if snapshot.ramUsed > snapshot.ramTotal {
-		snapshot.ramUsed = snapshot.ramTotal
-	}
-	if snapshot.swapUsed > snapshot.swapTotal {
-		snapshot.swapUsed = snapshot.swapTotal
-	}
-	return snapshot
+	return completeMemorySnapshot(snapshot, !containerized, readHostMemorySnapshot)
 }
 
 func mergeMemorySnapshot(procMem memorySnapshot, cgroup memorySnapshot, containerized bool) memorySnapshot {
 	snapshot := procMem
+	if containerized && !procMem.procContainerScoped {
+		snapshot = memorySnapshot{}
+	}
 	if cgroup.hasRAM {
 		snapshot.ramUsed = cgroup.ramUsed
 		snapshot.ramTotal = cgroup.ramTotal
 		snapshot.hasRAM = true
 	}
-	if containerized && cgroup.hasRAM && procMem.hasSwap {
-		snapshot.swapUsed = procMem.swapUsed
-		snapshot.swapTotal = procMem.swapTotal
-		snapshot.hasSwap = true
-		if snapshot.swapTotal > snapshot.ramTotal*4 {
-			snapshot.swapUsed = 0
-			snapshot.swapTotal = 0
-		}
-	} else if cgroup.hasSwap {
+	if cgroup.hasSwap {
 		snapshot.swapUsed = cgroup.swapUsed
 		snapshot.swapTotal = cgroup.swapTotal
-		snapshot.hasSwap = true
-	} else if containerized && cgroup.hasRAM {
-		snapshot.swapUsed = 0
-		snapshot.swapTotal = 0
 		snapshot.hasSwap = true
 	}
 	if snapshot.ramUsed > snapshot.ramTotal {
@@ -1917,16 +1905,7 @@ func mergeMemorySnapshot(procMem memorySnapshot, cgroup memorySnapshot, containe
 }
 
 func isLinuxContainer() bool {
-	if data, err := os.ReadFile("/proc/self/cgroup"); err == nil && detectContainerFromCgroup(string(data)) != "" {
-		return true
-	}
-	if _, err := os.Stat("/run/.containerenv"); err == nil {
-		return true
-	}
-	if _, err := os.Stat("/dev/.lxc-boot-id"); err == nil {
-		return true
-	}
-	return false
+	return (nodeMetricSource{platform: runtime.GOOS, root: "/"}).containerized()
 }
 
 func readProcMeminfo(path string) (memorySnapshot, error) {
@@ -3018,17 +2997,8 @@ func collectReportWithInterval(intervalSec int) Report {
 	r := Report{Version: Version, ReportInterval: intervalSec, Timestamp: now.UnixMilli()}
 	r.IPv4, r.IPv6 = localIPAddresses()
 
-	if percent, err := cpu.Percent(time.Second, false); err == nil && len(percent) > 0 {
-		r.CPU = percent[0]
-	}
-	if memory := readMemorySnapshot(); memory.hasRAM {
-		r.RAM = int64(memory.ramUsed)
-		r.RAMTotal = int64(memory.ramTotal)
-		if memory.hasSwap {
-			r.Swap = int64(memory.swapUsed)
-			r.SwapTotal = int64(memory.swapTotal)
-		}
-	}
+	applyCPUReport(&r, collectCPUReport())
+	applyMemoryReport(&r, readMemorySnapshot(), runtime.GOOS == "linux" && isLinuxContainer())
 	if loadInfo, err := load.Avg(); err == nil && loadAverageReportable() {
 		value := loadInfo.Load1
 		r.Load = &value
@@ -3037,20 +3007,7 @@ func collectReportWithInterval(intervalSec int) Report {
 	diskSnapshot := nodeMetrics.diskSnapshot(mountInclude, mountExclude)
 	r.Disk, r.DiskTotal = diskSnapshot.used, diskSnapshot.total
 	r.DiskSource, r.DiskSampledAt = diskSnapshot.source, diskSnapshot.sampledAt
-	if netIO, err := gnet.IOCounters(true); err == nil && len(netIO) > 0 {
-		// 只算一次网卡集合，累计流量与实时速率共用，避免两个数字用不同口径。
-		selected := trafficInterfaceSelection(netIO)
-		rawUp, rawDown := sumNetworkCounters(netIO, selected)
-		r.hasRawNetTotals = true
-		r.rawNetTotalUp = rawUp
-		r.rawNetTotalDown = rawDown
-		r.netPerInterface = collectPerInterfaceCounters(netIO, selected)
-		if trafficTracker != nil {
-			r.NetTotalUp, r.NetTotalDown = trafficTracker.adjustInterfaces(r.netPerInterface, now)
-		} else {
-			r.NetTotalUp, r.NetTotalDown = rawUp, rawDown
-		}
-	}
+	collectNetworkReport(&r, now, gnet.IOCounters)
 	r.ProcessCount = processCount()
 	r.Connections, r.ConnectionsUdp = connectionsCount()
 	r.Uptime = nodeMetrics.uptime()
@@ -3126,10 +3083,18 @@ func (p *reportPreparer) prepareReportForInterval(report Report, intervalSec int
 		report.Name = clientName
 	}
 
-	speedTotalUp, speedTotalDown := report.NetTotalUp, report.NetTotalDown
+	if !report.hasRawNetTotals && (report.NetTotalUp == nil || report.NetTotalDown == nil) {
+		report.NetIn, report.NetOut = nil, nil
+		report.setMetricError("network", "collection_failed")
+		p.ready = false
+		return report
+	}
+	var speedTotalUp, speedTotalDown int64
 	if report.hasRawNetTotals {
 		speedTotalUp = report.rawNetTotalUp
 		speedTotalDown = report.rawNetTotalDown
+	} else {
+		speedTotalUp, speedTotalDown = *report.NetTotalUp, *report.NetTotalDown
 	}
 
 	if !p.ready {
@@ -3139,6 +3104,8 @@ func (p *reportPreparer) prepareReportForInterval(report Report, intervalSec int
 		p.lastNetPerInterface = report.netPerInterface
 		p.lastTimestampMs = report.Timestamp
 		p.ready = true
+		report.NetIn, report.NetOut = nil, nil
+		report.setMetricError("network", "warming_up")
 		return report
 	}
 	if p.lastNetCountersRaw != report.hasRawNetTotals {
@@ -3147,6 +3114,8 @@ func (p *reportPreparer) prepareReportForInterval(report Report, intervalSec int
 		p.lastNetCountersRaw = report.hasRawNetTotals
 		p.lastNetPerInterface = report.netPerInterface
 		p.lastTimestampMs = report.Timestamp
+		report.NetIn, report.NetOut = nil, nil
+		report.setMetricError("network", "warming_up")
 		return report
 	}
 
@@ -3179,8 +3148,9 @@ func (p *reportPreparer) prepareReportForInterval(report Report, intervalSec int
 		effectiveIntervalSec = minIntervalSec
 	}
 	report.ReportInterval = effectiveIntervalSec
-	report.NetOut = upDelta / int64(effectiveIntervalSec)
-	report.NetIn = downDelta / int64(effectiveIntervalSec)
+	report.NetOut = int64Metric(upDelta / int64(effectiveIntervalSec))
+	report.NetIn = int64Metric(downDelta / int64(effectiveIntervalSec))
+	delete(report.MetricErrors, "network")
 	p.lastNetUp = speedTotalUp
 	p.lastNetDown = speedTotalDown
 	p.lastNetPerInterface = report.netPerInterface
@@ -3299,13 +3269,13 @@ func sendWebSocketReports(conn *safeWebSocketConn, reports []Report) error {
 }
 
 func logReport(prefix string, report Report) {
-	log.Printf("%s: CPU %.1f%%, RAM %s/%s, Net in=%dB/s out=%dB/s",
+	log.Printf("%s: CPU %s, RAM %s/%s, Net in=%s out=%s",
 		prefix,
-		report.CPU,
-		formatMemoryBytes(report.RAM),
-		formatMemoryBytes(report.RAMTotal),
-		report.NetIn,
-		report.NetOut,
+		formatOptionalCPU(report.CPU),
+		formatOptionalMemory(report.RAM),
+		formatOptionalMemory(report.RAMTotal),
+		formatOptionalRate(report.NetIn),
+		formatOptionalRate(report.NetOut),
 	)
 }
 

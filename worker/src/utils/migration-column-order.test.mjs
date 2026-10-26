@@ -19,7 +19,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 const migrationsDir = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'supabase', 'migrations');
-const files = readdirSync(migrationsDir).filter(name => name.endsWith('.sql')).sort();
+const files = readdirSync(migrationsDir).filter(name => name.endsWith('.sql'))
+  .sort((a, b) => a.localeCompare(b, 'en', { numeric: true }));
 
 assert.ok(files.length > 0, '没有扫到任何迁移文件，检查路径是否正确');
 

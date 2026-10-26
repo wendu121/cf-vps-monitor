@@ -1,19 +1,19 @@
 export interface PublicMonitorRecord {
   time: string;
-  cpu: number;
-  ram: number;
-  ram_total: number;
-  swap: number;
-  swap_total: number;
+  cpu: number | null;
+  ram: number | null;
+  ram_total: number | null;
+  swap: number | null;
+  swap_total: number | null;
   disk: number | null;
   disk_total: number | null;
   // null = 探针报告本机负载不可取信（容器内 /proc/loadavg 透传宿主机），不是 0。
   load: number | null;
   temp: number | null;
-  net_in: number;
-  net_out: number;
-  net_total_up: number;
-  net_total_down: number;
+  net_in: number | null;
+  net_out: number | null;
+  net_total_up: number | null;
+  net_total_down: number | null;
   process_count: number;
   connections: number;
   connections_udp: number;
@@ -60,14 +60,14 @@ function optionalMetric(record: Record<string, unknown>, key: string): number | 
   return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null;
 }
 
-// 负载允许显式为 null（不可用）。这里必须与 numberField 分开：
-// numberField 把 null 当作「字段非法」，会让 allNumbers 判否而**整条记录被丢弃**——
-// 后果是那台节点的历史图表整段消失，而不是负载一项缺失。
-// 返回 undefined 表示字段真的非法，整条丢弃。
-function loadField(record: Record<string, unknown>): number | null | undefined {
-  if (!('load' in record) || record.load === undefined) return 0;
-  if (record.load === null) return null;
-  return typeof record.load === 'number' && Number.isFinite(record.load) ? record.load : undefined;
+// 显式 null 是未测得；旧记录缺字段仍兼容 0。undefined 只表示非法输入。
+// 不能再用 allNumbers 统一判否：那样任一指标不可用都会**整条记录被丢弃**——
+// 后果是那台节点的历史图表整段消失，而不是只缺一项。
+function nullableNumberField(record: Record<string, unknown>, key: string): number | null | undefined {
+  const value = record[key];
+  if (value === undefined) return 0;
+  if (value === null) return null;
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
 }
 
 export function normalizePublicMonitorRecord(payload: unknown): PublicMonitorRecord | null {
@@ -75,20 +75,23 @@ export function normalizePublicMonitorRecord(payload: unknown): PublicMonitorRec
   if (!record) return null;
   const time = timeField(record);
   if (!time) return null;
-  const load = loadField(record);
+  const load = nullableNumberField(record, 'load');
   if (load === undefined) return null;
   // 温度未知不能补成 0，也不能丢弃同一条记录中的 CPU 等有效指标。
   const temp = typeof record.temp === 'number' && Number.isFinite(record.temp) ? record.temp : null;
+  const metrics = {
+    cpu: nullableNumberField(record, 'cpu'),
+    ram: nullableNumberField(record, 'ram'),
+    ram_total: nullableNumberField(record, 'ram_total'),
+    swap: nullableNumberField(record, 'swap'),
+    swap_total: nullableNumberField(record, 'swap_total'),
+    net_in: nullableNumberField(record, 'net_in'),
+    net_out: nullableNumberField(record, 'net_out'),
+    net_total_up: nullableNumberField(record, 'net_total_up'),
+    net_total_down: nullableNumberField(record, 'net_total_down'),
+  };
+  if (Object.values(metrics).some(value => value === undefined)) return null;
   const values = {
-    cpu: numberField(record, 'cpu'),
-    ram: numberField(record, 'ram'),
-    ram_total: numberField(record, 'ram_total'),
-    swap: numberField(record, 'swap'),
-    swap_total: numberField(record, 'swap_total'),
-    net_in: numberField(record, 'net_in'),
-    net_out: numberField(record, 'net_out'),
-    net_total_up: numberField(record, 'net_total_up'),
-    net_total_down: numberField(record, 'net_total_down'),
     process_count: numberField(record, 'process_count'),
     connections: numberField(record, 'connections'),
     connections_udp: numberField(record, 'connections_udp'),
@@ -97,19 +100,11 @@ export function normalizePublicMonitorRecord(payload: unknown): PublicMonitorRec
 
   return {
     time,
-    cpu: values.cpu,
-    ram: values.ram,
-    ram_total: values.ram_total,
-    swap: values.swap,
-    swap_total: values.swap_total,
+    ...metrics as Record<keyof typeof metrics, number | null>,
     disk: optionalMetric(record, 'disk'),
     disk_total: optionalMetric(record, 'disk_total'),
     load,
     temp,
-    net_in: values.net_in,
-    net_out: values.net_out,
-    net_total_up: values.net_total_up,
-    net_total_down: values.net_total_down,
     process_count: values.process_count,
     connections: values.connections,
     connections_udp: values.connections_udp,

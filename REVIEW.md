@@ -1,127 +1,164 @@
-<!-- reviewed-by: independent-subagent -->
+<!-- reviewed-by: independent-subagent (rev2: post-doc-fix) -->
+# 独立审议 (REVIEW) — 上游精选移植 B3「指标可用性」
 
-# 独立审议 (REVIEW) — 上游精选移植 B1+B2
+> 审议方：独立 `general-purpose` 子代理（主代理完成自审后另行起，未参与实现）。
+> 覆盖范围：工作区中 B3 全部改动（35 个已跟踪文件 + 1 个未跟踪迁移
+> `supabase/migrations/11_metric_availability.sql`）。
+> 结论：**PASS**，阻断项 0。
 
-- 审查对象工作树：`E:/工作站/cf-vps-monitor-src`（分支 `main`，HEAD `3f89905`，改动全部未提交）
-- 审查方式：只读复核 + 独立重跑 + 对上游对象（`69bbda4`、`7f63112..6ddadff`）逐行比对
-- 审查范围：B1（Windows 停止竞态）/ B2（健康恢复）/ 新增测试与夹具 / `VERIFICATION.md`。CF Tunnel WIP 按要求完全排除，未做任何读取性判断。
+## 阻断项
 
-## 审议结论
+无。
 
-**PASS**（阻断项 0 个）
+## 非阻断建议
 
-三项实质校验均独立通过：改动与上游语义一致（B1 一行、B2 两处删除）；新增测试具备真实判别力（我用 HEAD 旧代码反向跑夹具，`exited-after-enumeration` 由 `stopped:true` 变为 `stopped:false / ObjectNotFound`，证明用例不是空跑）；健康恢复/节流/读失败三条语义在代码与实测上都能闭环。发现的 7 项均为低/中等级证据或过程问题，不阻断入库。
+1. **迁移 11 是未跟踪文件**：`git status` 显示 `?? supabase/migrations/11_metric_availability.sql`，
+   `git diff HEAD` 不含它，因此自审开头的「35 文件 / +1353 / −293，含 1 个新增迁移」措辞不准确——
+   该统计（排除 VERIFICATION.md 后复算正好 35 files / +1353 / −293）**不含**该未跟踪 .sql。
+   提交时必须显式 `git add supabase/migrations/11_metric_availability.sql`，否则 `git commit -am`
+   会漏掉迁移源文件（打包产物里虽有 SQL，但 `migration-signatures.test.mjs` 的源文件一致性会断裂）。
+2. **`git stash pop` 大概率冲突**：`stash@{0}`（boss 的 CF Tunnel WIP）同时改了
+   `scripts/generate-migrations.mjs`、`scripts/test-support/postgres.mjs`、
+   `worker/src/db/supabase-api/migration-signatures.test.mjs`、
+   `worker/src/generated/supabase-migrations.ts`。pop 后需保留双边：排序函数 + 迁移清单同时含 10 与 11，
+   并重跑 `node scripts/generate-migrations.mjs` 确认版本序列为 1..11。
+3. `frontend/src/utils/nodeMetrics.ts:21` `sumMetrics()` 零参数会走 `[].reduce` 抛 TypeError
+   （当前无零参调用点，纯防御性）。
+4. `agent/main.go:1836` 把 `cores` 初值由 1 改为 0（上游语义）：若 `cpu.Counts(true)` 在个别平台失败，
+   CPU 规格会从「1 核」变为缺省不显示。知情即可。
+5. `mergeMemorySnapshot` 删掉了 fork 原有的「`swapTotal > ramTotal*4` → 清零」启发式
+   （上游 `TestAuditSwapRespectsCgroupBeforeHostProc` 明确反对按 RAM 比例否决 swap）。
+   副作用：少数把宿主机 swap 镜像进 cgroup 的 LXC，现在会显示大 swap 而不是 0/—。
+   建议上线后抽查 1–2 台 LXC 节点的 swap 面板。
+6. 迁移 11 的 `cfm_load_metric_window_stats` 把 ram/disk 的 `else 0` 改成「算不出来即排除样本」
+   （`where metric_value is not null`）。与「不可用≠0」一致，但会改变负载告警的 `samples` 分母
+   （`ram_total=0` 的样本不再当 0% 计入），阈值统计口径有变化。
+7. `toPublicReport` 现在把 `cpu_capacity` 与 `metric_errors` 放进公开快照
+   （匿名 `/api/live/clients` 可见），会暴露容器 CPU 配额与「容器作用域不可用」判定。
+   与上游一致；私有 fork 若在意，可改为仅登录态返回。
 
-## 交付物清单
+## 实际执行过的核查
 
-| # | 文件 | 状态 | 实际改动量 | 与上游关系 |
-|---|---|---|---|---|
-| 1 | `agent/install-windows.ps1` | M | 1 行（`494`） | 与 `69bbda4` 逐字相同 |
-| 2 | `agent/install-windows-safety.test.mjs` | M | +21 / -0 | 与 `69bbda4` 新增块逐字相同（仅保留本仓库既有的 `t.diagnostic`，属既有差异） |
-| 3 | `agent/testdata/windows-process-stop.ps1` | ??? 未跟踪 | 新增 59 行 | 与 `69bbda4` 版本 `diff` 为空（完全一致） |
-| 4 | `worker/src/utils/observability.ts` | M | -11 / +0 | 与 `7f63112..6ddadff` 的缓存删除两部分一致；有意未取 `cron_client_sync` 一行 |
-| 5 | `worker/src/utils/observability-health-recovery.test.mjs` | ??? 未跟踪 | 新增 117 行 | 本仓库自写（上游无此文件） |
-| 6 | `VERIFICATION.md` | M | 自审文档 | 复核见下节 |
+### 边界（是否夹带非 B3 改动）
 
-`git diff --stat` 实测：`install-windows-safety.test.mjs +21`、`install-windows.ps1 1 line`、`observability.ts -11`，与自审描述一致。
+- `grep -rn verboseLogf agent/` → 0 命中；`agent/logging.go` 不存在；`logReport` 仍是 `log.Printf`
+  （`agent/main.go:3269`），GPU / WebSocket 日志仍用 `log.Printf`。
+- 与 `6ddadff:agent/main.go` 逐段对照：差异**只**在 logging（`verboseLogf`/log-file/verbose 旗标）、
+  `redactURLSecret`/`normalizeServerURL`/`requestErrorWithoutURL` 这些 fork 自有实现；
+  B3 逻辑与上游逐字相同。
+- `grep ClientSyncChange|next_cursor_key|device_ordinal worker/src/db/types.ts` → 0 命中；
+  `types.ts` 只改 `MonitorRecord` 9 个字段的可空性。
+- `NodeTable.tsx`：`MiniPingChart` 仍是静态 import，全文件无 `lazy`/`Suspense`
+  （`App.tsx`/`Index.tsx` 的 lazy 是既有代码，未动）。
+- 新增 Go 文件 `metric_availability.go`/`memory_scope.go`/`cgroup_cpu.go`/`audit_*.go`
+  与上游逐字相同（忽略 CRLF 后 `diff` 完全一致）。
 
-## 独立重跑结果
+### 迁移
 
-未采信主代理结果，全部命令由我重跑。
+- `generated/supabase-migrations.ts` 版本序列 → `1,2,3,4,5,6,7,8,9,11`，顺序正确。
+- `11_metric_availability.sql` 与上游 `8_metric_availability.sql` **逐字节相同**。
+- 10 条迁移的 sha256 与 generated 内 checksum 全部一致（bad=0）。
+- `grep -rln "cfm_insert_monitor_record|cfm_load_metric_window_stats"` → 仅 `4_rpc_api.sql` 与 `11`；
+  迁移 6–9 未改过这两个函数，不存在被静默覆盖的 fork 修复。`4` 里 `load` 的「显式 null 特判」
+  被 `11` 的 `case when input_record ? 'load' then ... else 0 end` 等价覆盖，未丢语义。
+- pglite 直连建库成功（本身即证明自然排序生效）；`information_schema` 查证 9 列 `is_nullable=YES`。
+- 直连调用 `cfm_insert_monitor_record`：`{cpu:null,ram:null,swap:null,load:null}` → 落库全 null；
+  `{}` 缺字段 → 全 0；`cfm_load_metric_window_stats` 对该 client `samples=1`（null 样本被排除）。
 
-**1) 三文件合并回归**
+### 自审真实性
 
-```
-"C:/Users/sfkj/.workbuddy/binaries/node/versions/22.22.2-6/node.exe" --test \
-  worker/src/utils/observability.test.mjs \
-  worker/src/utils/observability-health-recovery.test.mjs \
-  agent/install-windows-safety.test.mjs
-```
-→ `# tests 30 / # pass 30 / # fail 0 / # skipped 0`，EXIT=0，duration ≈ 79.2s。
+- `go build ./...` EXIT=0；`go vet ./...` EXIT=0；`go test -count=1 ./...` → `ok ... 32.267s`
+  （自审写 31.548s，机器抖动）。
+- worker `tsc --noEmit` EXIT=0；`node --test` → **531 / 531 pass / 0 fail**。
+- frontend `tsc -b` EXIT=0；`node --test` → **150 / 150 pass / 0 fail**；
+  `test/metric-availability.audit.test.mjs` 单跑 24/24；`test/audit-metric-availability-runtime.test.mjs`
+  单跑 1/1（7.5s，真实 pglite）。
+- VERIFICATION 行号抽查全部对得上：`main.go:170–177`（指针无 `omitempty`）、`3086–3090`（网络不可用早退）、
+  `3151–3153`（恢复时 `delete(MetricErrors,"network")`）、`main_test.go:1006–1012`（拼入
+  `metric_availability.go`）；声称的 4 个 Go 用例名都真实存在。
 
-**2) 单独确认 Windows 夹具真跑（排除 skip 假绿）**
+### 语义
 
-```
-node --test --test-reporter=tap agent/install-windows-safety.test.mjs
-```
-→ `ok 13 - CI02 ... running` / `ok 14 - ... exited-after-enumeration` / `ok 15 - ... stop-denied` / `ok 16 - ... stop-failed`，`# pass 16 / # fail 0 / # skipped 0`。4 个场景确实执行，非 skip。
+- 上游 `agent/audit_swap_scope_test.go:32-48` 确实断言
+  `unavailable container swap must remain unavailable instead of borrowing host totals`
+  →「清零假装 0」改为「标记不可用」有上游依据。
+- `grep swap_total|hasSwap` 全仓：前端只剩 DetailsGrid/NodeTable 展示（已改 `=== undefined` 判定，
+  null 显示 `—`）、`ClientInfo` 的元数据总容量（另一概念）、类型放宽；无遗漏的「swap 当 0」假设。
+- `publicHistory.ts:66-117` 不变量成立：`nullableNumberField`（null→保留、undefined/非有限数→丢整行），
+  9 个指标逐个判 undefined；`process_count/connections/connections_udp` 仍走 `numberField`+`allNumbers`，未被放松。
+- `grep mergeHistoryRecords|historyCursorFromRecord|next_cursor_key` → 0 命中；前端审计测试与上游差异
+  **只有**删掉 `id` 断言那 2 行（已披露），无其它 id 依赖。
 
-**3) 单独重跑健康恢复用例**
+### 判别力反向验证（回退 → 跑 → 恢复，4 组）
 
-```
-node --test --test-reporter=tap worker/src/utils/observability-health-recovery.test.mjs
-```
-→ 5 个用例全 `ok`（same instance / another instance / repeated success throttle / missing database / read failure），`# pass 5 / # fail 0 / # skipped 0`，EXIT=0。
-
-**4) Worker 类型检查**
-
-```
-"C:/.../node.exe" worker/node_modules/typescript/bin/tsc --noEmit -p worker/tsconfig.json
-```
-→ 无输出，EXIT=0。
-
-**5) 补跑主代理遗漏的关联测试（我额外加的）**
-
-```
-node --test --test-reporter=tap worker/src/utils/observability-health-components.test.mjs \
-  worker/src/utils/webhook-business.reaudit.test.mjs
-```
-→ 无 `not ok`，EXIT=0（前者直接 import `observability.ts` 并断言组件注册表，属本次改动的邻接面）。
-
-**6) 判别力实验（关键，主代理未做）**：把 `HEAD:agent/install-windows.ps1`（仍为 `Stop-Process -Id`）取到临时目录，用同一夹具反向跑：
-
-| 场景 | 旧代码（`-Id`） | 新代码（`-InputObject`） |
+| 回退点 | 测试 | 结果 |
 |---|---|---|
-| running | stopped=true / null | stopped=true / null |
-| exited-after-enumeration | **stopped=false / ObjectNotFound** | stopped=true / null |
-| stop-denied | stopped=false / PermissionDenied | stopped=false / PermissionDenied |
-| stop-failed | stopped=false / InvalidOperation | stopped=false / InvalidOperation |
+| worker `toMonitorRecord` 的 `cpu: report.cpu` → `report.cpu \|\| 0` | monitor-report.metric-availability.audit | **12 pass / 1 fail**（cpu 那条） |
+| worker `toPublicReport` 删掉 `Object.assign(result, selectMetricAvailability(...))` | 同上 | **11 pass / 2 fail** |
+| frontend `nullableNumberField` 的 `null → null` 改成 `null → undefined`（退回丢整行） | publicHistory.load-unavailable + 前端审计 | **15 pass / 10 fail** |
+| frontend `buildMonitorChartData` 的 `cpu: cpu===null ? null` 改成 `? 0` | 前端审计 | **23 pass / 1 fail**（缺失缺口用例） |
 
-说明：`exited-after-enumeration` 用例在旧代码下必然失败 ⇒ 该用例真实约束本次修复，不是自我实现式空跑。
+每组回退都立刻变红 → 测试有判别力，不是恒真。恢复后复跑：worker 13/13、frontend 25/25 全绿；
+`git status` 仍为 37 行、`git diff --name-only` 与审查开始时一致，实验未留残留。
 
-**7) 宿主版本补充验证（我额外加的）**：README:139 以 `.\install-windows.ps1` 直接调用，宿主可能是 Windows PowerShell 5.1。用 `powershell.exe`(5.1) 跑同一夹具：`running` 与 `exited-after-enumeration` 均为 `stopped:true / exited:true / failureCategory:null`。即修复在 5.1 与 pwsh 7 下语义一致，无版本相关回归。
+### 测试是否被削弱
 
-## 交叉审视发现
+- 4 个 Go 测试改动全是机械类型适配（`CPU: float64Metric(17)` 等），断言保留原值
+  （如 `*report.NetOut != 40`），无 `ok(x!==undefined)` 之类放松。
+- `publicHistory.load-unavailable.test.mjs` 由「cpu null 应丢整行」改为「保留行且 cpu=null」+
+  新增「cpu 字符串仍丢整行」，属于加强。
+- `website-migration.reaudit.test.mjs` 的 `applied===9 → BUNDLED_SUPABASE_MIGRATIONS.length`
+  与上游逐字相同，非本地自选放松。
+- 两个新增 worker 审计测试与上游逐字相同。
 
-| 序号 | 严重度 | 问题 | 建议 | 是否阻断 |
-|---|---|---|---|---|
-| 1 | 中 | **两个交付文件仍处于未跟踪状态**：`git status --short` 显示 `?? agent/testdata/windows-process-stop.ps1`、`?? worker/src/utils/observability-health-recovery.test.mjs`。若按习惯 `git commit -am`，二者不会入库，CI 上 `install-windows-safety.test.mjs` 会因夹具 ENOENT 直接红，B2 则完全没有测试。 | 提交时显式 `git add` 这 5 个文件；提交后用 `git show --stat HEAD` 核对文件数=5。 | 否（代码本身无缺陷，属提交前置条件） |
-| 2 | 低 | **自审遗漏邻接测试**：`worker/src/utils/observability-health-components.test.mjs` 也 import `observability.ts`，VERIFICATION 第 5 项「三文件合并回归」未包含它，却在文中声称「合并回归 30/30」。 | 自审证据里补上该文件（我已补跑，EXIT=0，无回归）。 | 否 |
-| 3 | 低 | **自审对新用例数量记错**：`observability-health-recovery.test.mjs` 实为 **5** 个 `test()`（`observability-health-recovery.test.mjs:48` 的 `for` 生成 2 个，`74/89/99` 各 1 个），VERIFICATION 第 4 项写成「14/14（含 4 个新用例）」。总数 14 恰好对（`observability.test.mjs` 9 + 新文件 5），但拆分描述失真。 | 改成「9 + 5 = 14」。 | 否 |
-| 4 | 低 | **B1 的证据强度不足以支撑结论**：VERIFICATION 第 1 项用 `grep` 证明「规避 PID 复用竞态」，grep 只能证明文本存在。真正的机理是：`Get-AgentInstanceProcesses` 返回 `Get-Process` 对象（`install-windows.ps1:486`），对象已持有进程句柄，`Stop-Process -InputObject`（`install-windows.ps1:494`）走 `Process.Kill()` 按句柄终止，不再按 PID 二次解析，因此 PID 复用窗口被消除；`$process.WaitForExit(15000)`（`install-windows.ps1:495`）作用于同一对象仍有效（`running` 场景 stopped/exited 双 true 即其证据）。 | 自审改用「机理 + 旧代码反向对照」作为证据（见本文「重跑结果 6」）。 | 否 |
-| 5 | 低 | **读放大（非写放大）已发生**：删除进程内缓存后，每次 `ok` 都会先 `db.getSetting`（`observability.ts:147`）。节流窗口内旧实现 0 次读，现在每次调用 1 次读。量化：`worker/wrangler.toml:18` 为 `*/2`，`index.ts:998-1006` 7 个步骤按 `rotateScheduledItems` 轮转，粗估 +20~30 次读/小时；`notification-dispatch.ts:197/232/275` 每次发送 +1 读。Durable Object 热路径不受影响（`live-data.ts:2648-2650` 自带 `healthOkLastWriteAt` 1h 闸门，先短路再调用）。写放大仍被 DB `last_success_at` 正确约束（测试 3 实测 writes=1）。 | 属正确性换成本，可接受；但在免费 CPU 预算语境下建议上线后看一次 D1/RPC 读量，勿把「CPU 预算」当成已同时解决。 | 否 |
-| 6 | 低 | **error→success 在并发下不是绝对「一定」恢复**：`observability.ts:147` 读、`:163` 写是 read-modify-write，无 CAS。若成功写入与一个更早读到的错误写入交错，仍可能以旧值覆盖新值。上游同源，非本次引入，也不因删缓存而恶化（删缓存反而缩小了「进程内缓存长期压制恢复」的窗口）。 | 保持现状；如需强一致再评估条件更新 RPC。 | 否 |
-| 7 | 低 | **枚举阶段仍有窄竞态（上游同样未处理）**：`Get-AgentInstanceProcesses` 在 `install-windows.ps1:486-488` 用 `$_.Path` 过滤，若进程恰在枚举与取 `Path` 之间退出，`MainModule` 取值可能抛异常而中断安装。B1 只覆盖了 stop 阶段，「停止竞态已修复」不宜理解为「枚举竞态也已修复」。上游 `69bbda4` 未处理此项，故不算移植缺陷。 | 若后续要彻底收口，可对 `$_.Path` 做 try/catch 跳过已退出项。 | 否（无法独立验证：本机沙箱禁止我启动外部进程实测 `.MainModule` 退出后行为，仅有 .NET 语义推断） |
-| 8 | 低 | **上游同提交的 `agent/main_test.go`（22 行，纯测试侧）未移植**，VERIFICATION 只写「未跑 Go 测试」，未说明这是有意取舍。该改动只影响非 Windows 下 `TestExecuteICMPPingUsesResolvedPublicIP` 的假 ping/ping6 与 PATH 设置，无生产代码含义。 | 在自审里补一句「main_test.go 为测试侧修正，本次不取」。 | 否 |
+## 未复核项
 
-## 对自审(VERIFICATION.md)的复核
+- 未跑 `wrangler types --check` / `wrangler deploy --dry-run`，未对真实 Supabase 执行迁移
+  （`notify pgrst, 'reload schema'` 的真实 PG 行为未验）。
+- 未跑 `vite build`（只跑 `tsc -b`，未验证 Vite 对 `./format.ts`、`./nodeMetrics.ts` 带扩展名导入的实际打包）。
+- 未在真实 LXC / lxcfs / 受限 cgroup 主机上验证 `procFileIsLXCFS`、`readCgroupCPU`、swap 不可用判定，
+  仅 fixture 与单测层面。
+- 未做真实 Windows 服务安装/升级冒烟；未在真实 CF Durable Object 上验证冷启动持久化
+  （runtime 测试走 miniflare + pglite）。
+- 未跑 `frontend/browser/*.mjs` 浏览器审计脚本（上游该文件未移植）。
+- 未验证「老 Agent（缺字段）→ 服务端按 0 存」的**端到端**路径，只分层验证了
+  `normalizeMonitorReport` 与 SQL 函数。
 
-| 自审条目 | 复核结论 | 依据 |
-|---|---|---|
-| 1 Windows 停止改用进程对象 | **成立，但原证据偏弱** | 行号 `install-windows.ps1:494` 复现；语义由「重跑结果 6」的旧/新对照 + 句柄机理确认 |
-| 2 4 个停止场景夹具可执行 16/16 | **成立** | 独立重跑 16/16，`# skipped 0`，CI02 四例逐一 `ok` |
-| 3 成功节流缓存已彻底移除 | **成立** | `grep -rn healthSuccessThrottleCache worker/src agent` → 0 命中 |
-| 4 健康恢复 14/14 | **总数成立，拆分失实** | 实为 9（既有）+ 5（新增）= 14；新增是 5 例不是 4 例（见发现 3） |
-| 5 三文件合并回归 30/30 | **成立，但不完整** | 30/30 复现；漏了 `observability-health-components.test.mjs`（见发现 2，已补跑通过） |
-| 6 tsc EXIT=0 无输出 | **成立** | 复跑 EXIT=0、无输出 |
-| 7 改动范围未含 CF WIP | **成立** | `git status --short` 逐项比对，B1+B2 恰为 5 个文件；`observability.test.mjs` 未被改动（重要：既有断言未被削弱） |
-| 未验证项①真实 Windows 服务升级未实测 | **如实，且表述恰当** | 我同样未做；但补了 PS 5.1 宿主验证，缩小了该缺口 |
-| 未验证项②未跑全量 JS 套件 | **如实** | 我未跑全量（95 个测试文件，且会混入 CF WIP 噪声）；已补跑两个直接关联文件，均绿 |
-| 未验证项③未跑 Go | **如实** | 本次无 `.go` 改动，可不跑；但应说明 `main_test.go` 的取舍（发现 8） |
-| 未验证项④未做 wrangler dry-run | **如实** | 本次不涉配置/迁移 |
-| 未验证项⑤未验证真实 DO 并发 | **如实** | 单测用两个 loader 实例模拟；`createWorkerLoader`（`worker/test-support/worker-module.mjs:12`）为每次调用新建 vm context + 独立模块缓存，实例隔离是真实的，但共享 DB 不等于真实 DO 并发 |
-| 遗漏风险：读放大 | **缺失** | 自审未提「删缓存后每次都读」的成本（见发现 5） |
-| 遗漏风险：未跟踪文件 | **缺失** | 自审未提示两个新文件尚未 `git add`（见发现 1） |
-| `cron_client_sync` 故意不引入的理由 | **成立** | `grep -rn cron_client_sync worker/src` → 0 命中（仓库内无写入点）；`observability.test.mjs:167` 断言注册表长度 21、`:194-195` 断言无孤儿组件，强行加入确会红 |
+## §6 Post-PASS 增量复核（rev2）
 
-## 独立意见
+**触发原因**：上节「非阻断建议 #1」指出自审开头把未跟踪的 `11_metric_availability.sql` 算进了
+`git diff` 的 35 文件统计，措辞不准确。主代理据此只改了 `VERIFICATION.md` 开头一段（未动任何代码）。
 
-1. **B1 判定：真实修复，且是我认为唯一正确的写法。** 关键不在于「换了参数」，而在于终止动作从「按 PID 二次查找」变成「按已持有句柄执行」，这句改动同时把「已退出」从异常降级为无操作——`exited-after-enumeration` 由 `ObjectNotFound` 变为成功，正是这一点的实测体现。`WaitForExit` 仍针对同一对象，未失效（`running` 场景 stopped/exited 双 true 可证），`-ErrorAction Stop` 仍在，`stop-denied`/`stop-failed` 仍 fail-closed，安全边界没有被放松。
+**rev2 审议方**：另一位独立 `general-purpose` 子代理（与前一轮审议员不同的实例），范围限定为该处措辞。
 
-2. **B2 判定：语义正确，写放大真的被 DB 约束住了。** 节流条件为 `status==='ok' && previous.status==='ok' && last_success_at`（`observability.ts:148`），因此：错误之后的成功不受节流（实测 reads/writes 各 +1、`status` 立即回 `ok`、`last_failure_at` 保留）；同状态重复成功仍被 DB 时间戳压住（实测跨 3 次调用 writes 恒为 1）；读失败时 `getSetting` 抛出、未触及 `setSetting`（实测 writes 不增、持久化内容不变、`bestEffort` 只记一条 console.error 且不冒充成功）。四点与自审描述一致。
+### 核查与结论
 
-3. **测试不是假绿。** 这是我最花力气验证的一项：新增的 4 个 Windows 用例在旧代码下有一例必然失败，说明它们绑定了真实缺陷；B2 的 5 个用例全部打真实 PGlite + 真实 `cfm_settings_by_keys`/`cfm_set_settings`，并对读/写次数做了差分断言（`observability-health-recovery.test.mjs:67-68,81,85,110`），能同时抓住「恢复被压制」和「写放大回归」两个方向。唯一的形式瑕疵是 `stop-denied`/`stop-failed` 用 `Stop-Process` 函数覆写注入错误，属于对 cmdlet 的替换而非真实权限失败，但这是唯一可控的做法，且断言的是错误类别透传，可接受。
+1. **数字核对**：`git diff --stat HEAD -- . ':!VERIFICATION.md' ':!REVIEW.md'`
+   → `35 files changed, 1353 insertions(+), 293 deletions(-)`，与新表述「已跟踪文件 35 个 / +1353 / −293」
+   逐字吻合。全量 `git diff --stat HEAD` → `37 files changed, 1565 insertions(+), 451 deletions(-)`，
+   37 = 35 + 2，反证「不含两个文档」的括注必要且正确。
+2. **未跟踪迁移核对**：`git status --porcelain | grep '^??'` 仅一行
+   `?? supabase/migrations/11_metric_availability.sql`（4480 字节，盘上确实存在）。
+   「`git commit -am` 会漏掉它」成立——`-a` 只覆盖已跟踪文件的修改。
+3. **开头段其余引用**：`git log --oneline -1 a092297` 确为 B1+B2 提交；`git stash list` 的
+   `stash@{0}` 描述与自审一致（8 个文件）。rev2 指出一处**轻微不精确**：`10_cf_tunnel_domains.sql`
+   实际未出现在 `git stash show --name-only stash@{0}` 列表中（它在 stash 的未跟踪部分），
+   自审把它写进 stash 括注属列举不精确，不构成事实错误，不影响结论。
+4. **「差异只改了开头一段」的方法论说明**：`git diff -- VERIFICATION.md` 无法证明这一点——
+   HEAD 里的 VERIFICATION.md 仍是 B1+B2 版（blob `31b91d5`），B3 稿从未进过 index 或 commit，
+   git 只能给出「整份重写」。改用两组替代证据：
+   - **时间戳隔离**：`find . -newer VERIFICATION.md` 为空，即该文件是全仓最新；最近的源码改动是
+     `worker/src/utils/monitor-report.ts`（16:43:50），rev2 这一步（17:00:04）之后无任何源码被写。
+   - **正文引用抽查**：`main.go:170-177`（裸指针 + omitempty 组合）、`main.go:3086`（网络不可用早退）、
+     `main.go:3152`（`delete(MetricErrors,"network")`）、`main_test.go:1006-1012`（拼入
+     `metric_availability.go`）行号全部未位移，表格结论未被波及。
 
-4. **过程风险大于代码风险。** 唯一有实际后果的是发现 1：两个核心文件还没被 git 跟踪。代码本身我给 PASS，但提交动作必须显式 `git add` 这 5 个文件，否则「测试通过」这件事在 CI 上不成立。
+**rev2 结论**：`PASS`。新表述与实测一致，未引入新的不准确之处，也未波及正文结论、数字或表格行。
+rev2 建议保留该写法。
 
-5. **建议后续（不阻断）**：把邻接测试纳入常规回归集合；上线后观察一次 D1/RPC 读量以确认删除缓存没有把 CPU 预算吃回去；若要彻底收口停止竞态，再处理 `install-windows.ps1:486-488` 的枚举侧 `Path` 读取。
+### rev2 非阻断观察
+
+- 自审「仅属于 B3 的改动」严格说包含 `scripts/generate-migrations.mjs` 等 4 处自然排序修复，
+  那是 B3 暴露出的独立缺陷修复，VERIFICATION 第二节已如实交代，措辞可接受。
+- `REVIEW.md` 同为相对 HEAD 的整份重写且未提交，属 rev1 审议员写入，不涉及本次措辞修正。
+

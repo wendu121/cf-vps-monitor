@@ -3,7 +3,8 @@ import { readdir, readFile } from 'node:fs/promises';
 import { BUNDLED_SUPABASE_MIGRATIONS } from '../../generated/supabase-migrations.ts';
 
 const migrationsUrl = new URL('../../../../supabase/migrations/', import.meta.url);
-const migrationFiles = (await readdir(migrationsUrl)).filter((name) => name.endsWith('.sql')).sort();
+const migrationFiles = (await readdir(migrationsUrl)).filter((name) => name.endsWith('.sql'))
+  .sort((a, b) => a.localeCompare(b, 'en', { numeric: true }));
 assert.deepEqual(migrationFiles, [
   '1_core_schema.sql',
   '2_security_access.sql',
@@ -14,6 +15,7 @@ assert.deepEqual(migrationFiles, [
   '7_sla_month_fix.sql',
   '8_sla_leftjoin_cf_source.sql',
   '9_restore_cf_source.sql',
+  '11_metric_availability.sql',
 ]);
 assert.deepEqual(BUNDLED_SUPABASE_MIGRATIONS.map(({ version }) => version), [
   '1_core_schema',
@@ -25,6 +27,7 @@ assert.deepEqual(BUNDLED_SUPABASE_MIGRATIONS.map(({ version }) => version), [
   '7_sla_month_fix',
   '8_sla_leftjoin_cf_source',
   '9_restore_cf_source',
+  '11_metric_availability',
 ]);
 
 const featureSchemaSql = await readFile(new URL('3_feature_schema.sql', migrationsUrl), 'utf8');

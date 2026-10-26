@@ -16,9 +16,13 @@ function normalizeSql(sql) {
     .trim();
 }
 
+// 迁移编号进入两位数后，纯字符串排序会把 10_/11_ 排到 1_ 与 2_ 之间，
+// 导致后面的 alter table 跑在建表之前。必须按数字段自然排序。
+const migrationOrder = (a, b) => a.localeCompare(b, 'en', { numeric: true });
+
 const migrations = readdirSync(migrationsDir)
   .filter((name) => name.endsWith('.sql'))
-  .sort()
+  .sort(migrationOrder)
   .map((fileName) => {
     const version = fileName.replace(/\.sql$/i, '');
     const sql = normalizeSql(readFileSync(join(migrationsDir, fileName), 'utf8'));
