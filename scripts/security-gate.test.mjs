@@ -241,3 +241,63 @@ test('AUD-20 govulncheck exiting non-zero with a clean line is still a contradic
   const result = await fixture({ go: { status: 3, stdout: 'No vulnerabilities found.\n', stderr: '' } });
   assert.equal(result.status, 1, 'exit 3 means findings, so a clean line contradicts it');
 });
+
+test('AUD-20 one unmappable advisory cannot hide behind baselined neighbours', async () => {
+  const known = baseline.npmAdvisories[0];
+  // The dangerous shape is *partial* failure: the readable advisory satisfies the
+  // baseline, so checking only "total > 0 and nothing mapped" would let the unreadable
+  // critical through. Every unparsed `via` must therefore be fatal on its own.
+  const mixed = {
+    status: 1,
+    stdout: JSON.stringify({
+      auditReportVersion: 2,
+      vulnerabilities: {
+        [known.package]: {
+          severity: known.severity, range: '*',
+          via: [{ source: 1, name: known.package, dependency: known.package, title: 'baselined',
+            url: `https://github.com/advisories/${known.id}`, severity: known.severity, range: '*' }],
+        },
+        'mystery-pkg': {
+          severity: 'critical', range: '*',
+          via: [{ source: 1, name: 'mystery-pkg', dependency: 'mystery-pkg', title: 'unmappable critical',
+            url: 'https://example.invalid/security/notice-42', severity: 'critical', range: '*' }],
+        },
+      },
+      metadata: { vulnerabilities: { info: 0, low: 0, moderate: 1, high: 0, critical: 1, total: 2 } },
+    }),
+    stderr: '',
+  };
+  const result = await fixture({ npm: mixed });
+  assert.equal(result.status, 1, 'a readable baselined advisory must not carry an unreadable critical to success');
+  assert.match(result.error.message, /could not be mapped to a GHSA\/CVE id/);
+  assert.match(result.error.message, /mystery-pkg/);
+});
+
+test('AUD-20 a CVE-only advisory is mapped to an id rather than dropped', async () => {
+  const { mkdtemp, writeFile } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const dir = await mkdtemp(join(tmpdir(), 'cf-baseline-'));
+  const baselinePath = join(dir, 'security-baseline.json');
+  await writeFile(baselinePath, JSON.stringify({
+    npmAdvisories: [{ id: 'CVE-2026-12345', package: 'legacy-pkg', severity: 'moderate', blockedBy: 'synthetic' }],
+    goVulnerabilities: [],
+  }));
+  const report = {
+    status: 1,
+    stdout: JSON.stringify({
+      auditReportVersion: 2,
+      vulnerabilities: {
+        'legacy-pkg': {
+          severity: 'moderate', range: '*',
+          via: [{ source: 1, name: 'legacy-pkg', dependency: 'legacy-pkg', title: 'cve only',
+            url: 'https://nvd.nist.gov/vuln/detail/CVE-2026-12345', severity: 'moderate', range: '*' }],
+        },
+      },
+      metadata: { vulnerabilities: { info: 0, low: 0, moderate: 1, high: 0, critical: 0, total: 1 } },
+    }),
+    stderr: '',
+  };
+  const result = await fixture({ npm: report, baselinePath });
+  assert.equal(result.status, 0, result.error?.stack);
+});

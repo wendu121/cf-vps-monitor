@@ -23,8 +23,20 @@
 > **PASS，阻断 0**，两个原阻断项均确认闭环（审议方自己复现了
 > 「改回 continue-on-error → 测试变红」的判别力实验，并核对 ci.yml sha256 前后一致）。
 > rev2 另提 3 处非阻断发现，已在本轮一并修掉（见「三、已验证」末尾的加固表）。
+>
+> **rev3（lock 重写专项）判 REJECT，阻断 1**：我用「删 `package-lock.json` 重生成」
+> 来更新依赖，产出 682 增 / 195 删。审议员实测出一条更保守的定点更新路径，直接
+> **证伪了我「唯一手段」的核心论证**，并指出重生成白送了 2 个与安全无关的升级。
+> 该结论我已独立复现，**已把 lock 回退为定点更新版**（358 条不变，134/134 行改动，
+> 零越界升级）。详见「二、`package-lock.json` 的改动范围」。rev3 另提 1 处
+> **fail-open**（部分 advisory 无法映射时放行），也已修掉并补了 2 条测试。
 
-## 一、依赖修复：npm 10 → 4，Go 10 → 0
+## 一、依赖修复：4 个根因包已修（npm advisory 仍 6 条），Go 10 → 0
+
+> 口径说明：npm 侧改前改后**都是 6 条 advisory** —— 修掉的是这 6 条所挂的 4 个
+> **根因包**（undici / sharp / source-map-js / hono）。剩下 4 个包（vite 5 条 +
+> postcss-selector-parser 1 条）升不动，进入基线。所以这里不写「10 → 4」，
+> 那个数字是受影响包数的瞬时值，会抖（见「三、已验证」的漏洞数口径更正）。
 
 漏洞均为**上游 v2.0.3 继承**，非本移植引入（`git diff a092297~1 HEAD -- package.json
 package-lock.json agent/go.mod agent/go.sum` 此前为空）。
@@ -87,36 +99,60 @@ CI 的 `Setup Go` 用 `go-version-file: agent/go.mod`，会自动装 1.26.10，�
 要么是包名字符串（漏洞属于上游，会在上游条目里被判定）。只有前者参与基线判定，
 否则 `postcss-nested` / `tailwindcss` 这类纯传递条目会被重复计数。
 
-### `package-lock.json` 的改动范围披露（682 增 / 195 删，远大于 4 个包）
+### `package-lock.json` 的改动范围（rev3 后改为定点更新）
 
-`vite` 升不上去，是 workspace 解析层僵死；**唯一能让 lock 真正更新成功的手段是删掉
-`package-lock.json` 重新生成**（前 7 种方式全部报 `up to date`）。重生成带来一个
-**我没预料到、但查证后确认是净收益**的副作用：
+> **这里记一次被自己推翻的判断，保留痕迹。**
+> 我最初的做法是删掉 `package-lock.json` 全量重生成，理由是「vite 升不上去 =
+> workspace 解析僵死 = 唯一手段只能重生成」，产出 **682 增 / 195 删**。
+> rev3 独立审议判 **REJECT**，并实测出一条更保守的路径，直接证伪了「唯一手段」：
+> 旧 lock 只需要两条定点命令就能达成**完全相同**的安全结论。该结论我已复现。
 
-| | HEAD | 本轮 |
-| --- | --- | --- |
-| `@rolldown/binding` 条目 | 2 个，且**分层混杂**：`win32-x64-msvc` 在 `frontend/node_modules/`、`linux-x64-gnu` 在根 `node_modules/` | 16 个，全部落在 `frontend/node_modules/`（rolldown 自己所在层），与 `rolldown` 的 15 个 `optionalDependencies` 一一对应 |
+**实际采用的做法**（在 `c26f91a` 的旧 lock 基础上定点更新，不重生成）：
 
-HEAD 那种「两个平台各锁一个、还分属不同层级」的状态，是历史上 Windows 与 Linux
-两个环境分别 `npm install` 各自把本平台 binding 写进 lock 后合并提交的产物
-（`git show HEAD:package-lock.json` 可复现）。它恰好凑齐了本地与 CI 所需的两块，
-所以 CI 的 `Build` 一直能过 —— 属于**偶然正确**。
-
-重生成后 `rolldown` 的 15 个平台 binding 全量齐备且同层（含 CI 需要的
-`linux-x64-gnu`：`os:["linux"]` / `cpu:["x64"]` / `optional:true`），
-结构自洽不再依赖巧合。实测确认关键包版本未漂移：
-
-```
-vite 8.0.16（未升，基线内）· undici 7.30.1 · sharp 0.35.5 · source-map-js 1.2.2
-hono 4.13.14 · postcss-selector-parser 6.1.4 · miniflare 4.20260730.0 · wrangler 4.116.0
+```bash
+git checkout c26f91a -- package-lock.json
+npm install --package-lock-only --ignore-scripts --registry=https://registry.npmjs.org
+npm update source-map-js --package-lock-only --ignore-scripts --registry=https://registry.npmjs.org
 ```
 
-`wrangler` 维持 4.116.0 不变 → `wrangler types` 生成口径不变，不影响上一轮修好的 Lint。
-根 `node_modules/@rolldown/binding-wasm32-wasi`（+内嵌 `@emnapi/runtime`）为 rolldown
-新增的 wasm 兜底依赖，同样 `optional:true`。
+第二条是必需的：`overrides` 里新增的 `source-map-js: 1.2.2` 不会被 `npm install`
+的这次 resolve 采纳（仍停在 1.2.1），必须单独 `npm update` 推一把。
 
-**风险披露**：这是一次大范围 lock 重写，`npm ci --dry-run` EXIT=0 只证明结构合法、
-未能证明 Linux 上的实际安装结果。最终以真实 CI（`ubuntu-latest`）的 `Build` 步骤为准。
+**结果（实测）**：
+
+```
+packages: 358 -> 358
+added:   1  ["worker/node_modules/hono"]      ← hono 4.13.14 上移到 worker 层
+removed: 1  ["node_modules/hono"]
+version-changed: 29   ← 25 个 @img/sharp-* 平台包 + 2 个 sharp-libvips + sharp + undici + source-map-js
+git diff --stat c26f91a -- package-lock.json:  134 insertions(+), 134 deletions(-)
+```
+
+29 项版本变化**全部**是本次目标包及其平台/传递包，**没有越界升级**：
+
+```
+sharp 0.35.4 → 0.35.5              ✓ 目标
+undici 7.29.0 → 7.30.1             ✓ 目标
+source-map-js 1.2.1 → 1.2.2        ✓ 目标
+@img/sharp-* 0.35.4 → 0.35.5       ✓ sharp 的 25 个平台包
+@img/sharp-libvips-* 1.3.3 → 1.3.4 ✓ sharp 传递依赖
+```
+
+对比被废弃的重生成版本，它额外夹带了 2 个与安全无关的漂移（`postcss 8.5.28 → 8.5.31`、
+`nanoid 3.3.18 → 3.3.20`）和 6 处包层级搬移。现在这些**全部保持原样**：
+
+```
+vite 8.0.16（未升，留在基线）· postcss 8.5.28 · nanoid 3.3.18
+rolldown 1.0.3 · lightningcss 1.32.0 · wrangler 4.116.0 · hono 4.13.14
+```
+
+`wrangler` 维持 4.116.0 → `wrangler types` 生成口径不变，不影响上一轮修好的 Lint。
+
+**关于「vite 的 8 次尝试全部失败」的更正**：这 8 次尝试里 `npm install` 会打印
+`up to date`，但同时**静默应用**了 sharp / undici / hono 的变更（只有 `source-map-js`
+需要额外 `npm update`）。我当时只盯 `npm ls vite` 的版本号，看到它仍是 8.0.16 就判定
+「全都没生效」，进而得出「只能删 lock 重生成」的错误结论。
+**vite 本来就不在本轮的升级范围内**（它留在基线），所以完全不该用它来判定成败。
 
 ### 保留 `npm audit` 非零退出的理由（关键）
 
@@ -154,39 +190,72 @@ hono 4.13.14 · postcss-selector-parser 6.1.4 · miniflare 4.20260730.0 · wrang
 
 - **安全门禁整体**：`npm run security:check` → **EXIT=0**
   ```
-  npm audit: 4 known finding(s), all covered by the baseline (6 advisory id(s)).
+  npm audit: 2 known finding(s), all covered by the baseline (6 advisory id(s)).
   govulncheck: no vulnerabilities found.
   ```
-- **漏洞数**：npm `{moderate:3, high:1, total:4}`（改前 `{4,6,10}`）；Go **0**（改前 10）。
+- **漏洞数口径更正**：advisory **恒定 6 条**，这是唯一稳定的指标。
+  `metadata.vulnerabilities.total` 统计的是**受影响包数**，实测在 **2 ~ 4 之间抖动**
+  （`postcss-nested` / `tailwindcss` 这类传递条目是否被计入会浮动），同一份 lock
+  连跑出现过 4、2、2。所以**不再写「10 → 4」这种硬指标**，真正稳定的对比是
+  「npm advisory 6 条」（改前后数量相同，但改后 4 条根因包已修，见下）+「Go 10 条 → 0 条」。
 - **判别力实验（证明新测试非恒真）**：把 security 步骤改回 `continue-on-error: true`
   → `security-gate.test.mjs` 变 **1 fail**；恢复后全过。
-- **测试**：`scripts/security-gate.test.mjs` **14/14**（原 7 + 新增 7）。新增覆盖：
-  ①基线内放行 ②基线外阻断 ③基线缺失/损坏 fail closed ④**CI 步骤不得是
+- **测试**：`scripts/security-gate.test.mjs` **16/16**（原 7 + rev2 新增 7 + rev3 新增 2）。
+  新增覆盖：①基线内放行 ②基线外阻断 ③基线缺失/损坏 fail closed ④**CI 步骤不得是
   `continue-on-error`** ⑤**基线 advisory 的 severity 被上调 → 失败** ⑥**报告声称有漏洞
-  却解析不出任何 advisory id → 失败** ⑦govulncheck 非零退出却输出干净行 → 判矛盾失败。
-- **lock 一致性**：`npm ci --dry-run` → EXIT=0。
-- **依赖树**：`npm ls` 无 `invalid` / `UNMET` / `extraneous`。
+  却解析不出任何 advisory id → 失败** ⑦govulncheck 非零退出却输出干净行 → 判矛盾失败
+  ⑧**一条无法映射的 critical 不能靠可映射的邻居混过去** ⑨**CVE-only 的 url 能映射成 id**。
+- **门禁的 fail-open 修复（rev3 非阻断发现 1）**：原实现只校验
+  「`total>0` 且**一条都**映射不出」，于是混合报告里「可映射的 baselined 项 + 一条读不出
+  id 的 critical」会整体放行。现在 `collectAdvisories` 额外返回 `unmapped` 列表，
+  **只要有任意一条映射不出就失败**；同时把 id 识别从「仅 GHSA」放宽到
+  `CVE-\d{4}-\d{4,}`，避免 CVE-only 条目被误杀。
 - **Go**：`go build` / `go vet` / `go test` 全部 EXIT=0（`ok 31.044s`）。
   **在 `828f68c` 干净 worktree 复验**（自动拉到 `go1.26.10 windows/amd64`）：
   `BUILD=OK` / `VET=OK` / `ok github.com/cf-vps-monitor/agent 31.903s`，EXIT=0 ——
   确认升到 1.26.10 后测试仍全绿，不是靠本地旧版工具链蒙过。
-- **lock 的平台完整性**：`npm ci --dry-run --os=linux --cpu=x64` → **EXIT=0**，
-  382 个包可解析，日志里包含 `@cloudflare/workerd-linux-64` 等 Linux 专属包，
-  说明重写后的 lock 在 CI 的目标平台上条目齐备。
+- **lock 在 Linux 上的可安装性（真实安装，不是 dry-run）**：在 `_ci-verify` 干净快照里
+  换上定点版 lock 后跑 `npm ci --os=linux --cpu=x64 --ignore-scripts` → **EXIT=0**（1m57s）。
+  审计员已指出 `--dry-run` 的日志会**同时列出所有平台**的包（win32 与 linux 并列），
+  拿它当证据无效，所以这里改成真实落地校验：
+  ```
+  node_modules/@rolldown/binding-linux-x64-gnu/rolldown-binding.linux-x64-gnu.node  (21 MB)
+  createRequire(frontend/node_modules/rolldown/package.json).resolve(
+    '@rolldown/binding-linux-x64-gnu/package.json')
+    → OK  E:\...\_ci-verify\node_modules\@rolldown\binding-linux-x64-gnu\package.json
+  误装检查：未发现任何 binding-win32-* / binding-darwin-* 落地
+  ```
+  即旧 lock 的「win32 在 `frontend/`、linux 在根」布局，在 Node 的向上查找规则下
+  **本来就能解析**（`frontend/node_modules/rolldown` → `frontend/node_modules` → 根
+  `node_modules` 命中），不需要重写 lock 去"修"它。
+  （探针自纠一笔：我第一次用 `require()` 去读该包，因它是纯 native 包、`exports`
+  未导出 `package.json` 而报 `NOT FOUND`，差点误判为解析失败；`resolve()` 才是正确探针。）
+- **依赖树**：本地 `npm ls` **有 4 个 `extraneous`**（`@emnapi/runtime`、`@emnapi/wasi-threads`、
+  `@img/sharp-wasm32`、`@tybys/wasm-util`），原因是本地 `node_modules` 与入库 lock 不同步
+  （既存状态，非本轮引入）。`npm ci` 会清空重装，不影响 CI。
+  **不再声称「无 extraneous」** —— 上一版那样写属于失准。
 - **TypeScript**：worker `tsc --noEmit` 0 错；frontend `tsc --noEmit` 0 错。
-- **JS 测试**：worker **532/532**；frontend **150/150**。
-- **构建**：`vite build` EXIT=0（`✓ built in 20.84s`）。
+- **JS 测试**：worker **532/532**、frontend **150/150**，均在**定点版 lock** 下复跑
+  （worker 200s / frontend 25s），全绿。
+- **lock 与 package.json 的一致性**：`npm ci --dry-run` → **EXIT=0**（定点版 lock）。
+- **构建**：`cd frontend && npx vite build --outDir dist-verify --emptyOutDir` → **EXIT=0**
+  （`✓ built in 22.87s`）。产物用 `mv` 移出工作区，不留未跟踪目录。
+  踩坑记录：最初写成 `npm --prefix frontend exec -- vite build`，报
+  `[UNRESOLVED_ENTRY] Cannot resolve entry module index.html` —— `--prefix` 只改包解析、
+  **不改 cwd**，vite 在仓库根找不到 `frontend/index.html`。这是命令姿势问题，不是依赖问题。
 - **YAML**：grep 实测 **13 个 step**（rev1 曾误写 14，因为当时还有 Record 步骤），
   `Dependency and toolchain security` 块内只有 `run: npm run security:check`，
   全文件 `continue-on-error` 仅出现在第 122 行的注释里。
 
-### 相比 rev1 追加的三处加固（源自 rev2 审议的非阻断发现）
+### 逐轮追加的加固（源自各轮审议的非阻断发现）
 
-| 漏洞 | 修法 |
-| --- | --- |
-| 基线只比 id、不比 severity，advisory 被上调（moderate→critical）会静默放行 | 基线记录 accepted severity，实际更高即失败；未知 severity 按最高处理 |
-| 报告 `total > 0` 却解析出 0 个 advisory 会静默通过 | 判为报告结构异常，直接失败 |
-| `goVulnerabilities` 分支因 govulncheck exit 3 先被拦而不可达（死代码） | 允许 exit ∈ {0,3}，让基线判定真正可达；3 却输出「无漏洞」判矛盾失败；其余退出码仍是硬失败 |
+| 来源 | 漏洞 | 修法 |
+| --- | --- | --- |
+| rev2 | 基线只比 id、不比 severity，advisory 被上调（moderate→critical）会静默放行 | 基线记录 accepted severity，实际更高即失败；未知 severity 按最高处理 |
+| rev2 | 报告 `total > 0` 却解析出 0 个 advisory 会静默通过 | 判为报告结构异常，直接失败 |
+| rev2 | `goVulnerabilities` 分支因 govulncheck exit 3 先被拦而不可达（死代码） | 允许 exit ∈ {0,3}，让基线判定真正可达；3 却输出「无漏洞」判矛盾失败；其余退出码仍是硬失败 |
+| rev3 | **部分** advisory 无法映射时会整体放行（`total>0` 但 `found.size>0` 就过），一条读不出 id 的 critical 能躲在可映射的邻居后面 | `collectAdvisories` 额外返回 `unmapped`，任意一条映射不出即失败；id 识别放宽到 CVE，避免误杀 |
+| rev3 | `package-lock.json` 大范围重生成（682/195）夹带 2 个越界升级 | 回退为定点更新，134/134 行，零越界 |
 
 ## 未验证 / 需披露
 

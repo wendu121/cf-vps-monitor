@@ -80,7 +80,7 @@ function loadBaseline(baselinePath = defaultBaselinePath) {
   }
   const npm = new Map();
   for (const entry of npmEntries) {
-    if (!entry || typeof entry.id !== 'string' || !/^GHSA-[a-z0-9-]+$/i.test(entry.id)) {
+    if (!entry || typeof entry.id !== 'string' || !advisoryIdPattern.test(entry.id)) {
       throw new Error(`security baseline has an invalid npm advisory id: ${JSON.stringify(entry?.id)}`);
     }
     if (!severities.includes(entry.severity)) {
@@ -99,29 +99,52 @@ function loadBaseline(baselinePath = defaultBaselinePath) {
   return { npm, go };
 }
 
+const advisoryIdPattern = /^(?:GHSA-[a-z0-9-]+|CVE-\d{4}-\d{4,})$/i;
+
 /**
- * Flattens the audit report into advisory ids. `via` entries are either advisory
- * objects (this package owns the finding) or plain strings naming an upstream
- * package (the finding belongs to that package and is reported there), so only
- * the former participate in the baseline decision.
+ * Advisory ids arrive as a `url` on the `via` object. Most are GHSA links, but some
+ * are published only against a CVE (NVD link), so both forms are accepted. Anything
+ * else yields null and is reported as unmappable rather than dropped — a silently
+ * dropped advisory would let the rest of the report carry the gate to success.
+ */
+function extractAdvisoryId(url) {
+  if (typeof url !== 'string') return null;
+  const ghsa = url.match(/GHSA-[a-z0-9-]+/i);
+  if (ghsa) return ghsa[0];
+  const cve = url.match(/CVE-\d{4}-\d{4,}/i);
+  return cve ? cve[0] : null;
+}
+
+/**
+ * Flattens the audit report into advisory ids and, separately, the `via` entries that
+ * could not be mapped to one. `via` entries are either advisory objects (this package
+ * owns the finding) or plain strings naming an upstream package (the finding belongs
+ * to that package and is reported there), so only the former participate in the
+ * baseline decision. Unmappable entries are returned instead of discarded so the
+ * caller can fail closed; checking only "total > 0 and nothing mapped" would still
+ * pass a mixed report that hides one unreadable critical behind readable neighbours.
  */
 function collectAdvisories(vulnerabilities) {
   const found = new Map();
+  const unmapped = [];
   for (const [name, detail] of Object.entries(vulnerabilities)) {
     for (const via of detail?.via ?? []) {
       if (via && typeof via === 'object') {
-        const id = typeof via.url === 'string' && via.url.includes('GHSA-')
-          ? via.url.split('/').pop()
-          : null;
-        if (id) {
-          found.set(id, { package: name, severity: via.severity ?? detail.severity, title: via.title ?? '' });
-        }
-      } else if (typeof via === 'string' && /^GHSA-[a-z0-9-]+$/i.test(via)) {
-        found.set(via, { package: name, severity: detail.severity, title: '' });
+        const id = extractAdvisoryId(via.url);
+        const entry = {
+          package: name,
+          severity: via.severity ?? detail.severity,
+          title: via.title ?? '',
+          url: typeof via.url === 'string' ? via.url : null,
+        };
+        if (id) found.set(id, entry);
+        else unmapped.push(entry);
+      } else if (typeof via === 'string' && advisoryIdPattern.test(via)) {
+        found.set(via, { package: name, severity: detail.severity, title: '', url: null });
       }
     }
   }
-  return found;
+  return { found, unmapped };
 }
 
 function describe(entry) {
@@ -138,7 +161,7 @@ export function runSecurityChecks({ run = spawnSync, log = console.log, baseline
     shell: !npmCli && process.platform === 'win32', timeout: 120000, maxBuffer: 16 * 1024 * 1024,
   });
   const report = readAuditReport(npm);
-  const found = collectAdvisories(report.vulnerabilities);
+  const { found, unmapped } = collectAdvisories(report.vulnerabilities);
   const npmCounts = report.metadata.vulnerabilities;
   // A report that claims findings but yields no advisory id means the shape we rely on
   // changed (or the output was truncated). Refuse rather than silently allowing it.
@@ -146,6 +169,15 @@ export function runSecurityChecks({ run = spawnSync, log = console.log, baseline
     throw new Error(
       `npm audit reported ${npmCounts.total} vulnerabilit(ies) but none could be mapped to an advisory id; `
       + 'refusing to treat an unparseable report as clean.',
+    );
+  }
+  // A *partial* failure is the dangerous case: the readable advisories would satisfy the
+  // baseline while an unreadable one (possibly the only critical) rides along unnoticed.
+  if (unmapped.length > 0) {
+    const lines = unmapped.map(entry => `  ${describe(entry)}${entry.url ? ` (${entry.url})` : ' (no advisory url)'}`).join('\n');
+    throw new Error(
+      `npm audit reported ${unmapped.length} advisor${unmapped.length === 1 ? 'y' : 'ies'} that could not be mapped to a GHSA/CVE id:\n${lines}\n`
+      + 'Refusing to treat a partially unparseable report as clean.',
     );
   }
   const unbaselined = [];
