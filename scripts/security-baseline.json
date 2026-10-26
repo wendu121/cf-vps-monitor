@@ -1,7 +1,8 @@
 {
   "$schema-comment": "依赖漏洞基线：只放行此处列出的 advisory ID，任何新增 advisory 仍会被 security-check 阻断。",
   "$why": [
-    "本仓从上游 kadidalax/cf-vps-monitor v2.0.3 继承了 10 条依赖漏洞（可用 git log 核对：",
+    "本仓从上游 kadidalax/cf-vps-monitor v2.0.3 继承了 22 条依赖 advisory（8 个受影响包；",
+    "其中 undici 7.29.0 一个包就挂 13 条。可用 git log 核对：",
     "移植期间的提交从未改动 package.json / package-lock.json / go.mod / go.sum）。",
     "origin 项目的 npm audit 要求 total === 0，因此这些继承漏洞会让整条 CI 长期卡死，",
     "连后置的 Check migration drift 步骤都从未真正执行过。",

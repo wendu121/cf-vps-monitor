@@ -30,18 +30,38 @@
 > 该结论我已独立复现，**已把 lock 回退为定点更新版**（358 条不变，134/134 行改动，
 > 零越界升级）。详见「二、`package-lock.json` 的改动范围」。rev3 另提 1 处
 > **fail-open**（部分 advisory 无法映射时放行），也已修掉并补了 2 条测试。
+>
+> **rev4（整改复审）判 PASS，阻断 0**：阻断 1 与 fail-open 均经审议方自写探针闭环
+> （A–F 六场景：混合报告 exit=1、CVE-only 可匹配、全基线放行、新增/提级仍阻断）。
+> 但它又抓出我的**文档事实性错误**：真实改前是 **22 条 advisory / 8 个受影响包**
+> （`undici` 单包 13 条），不是我一直写的「10 条」。本轮已按 22 → 6、8 → 2 全量更正
+> `VERIFICATION.md` / `ci.yml` 注释 / `security-baseline.json` 的 `$why`。
+> 这是同一类数字第三次出错，故在上文「一」和「三」两处都留了纠错痕迹。
 
-## 一、依赖修复：4 个根因包已修（npm advisory 仍 6 条），Go 10 → 0
+## 一、依赖修复：npm 22 条 advisory / 8 个包 → 6 条 / 2 个包，Go 10 → 0
 
-> 口径说明：npm 侧改前改后**都是 6 条 advisory** —— 修掉的是这 6 条所挂的 4 个
-> **根因包**（undici / sharp / source-map-js / hono）。剩下 4 个包（vite 5 条 +
-> postcss-selector-parser 1 条）升不动，进入基线。所以这里不写「10 → 4」，
-> 那个数字是受影响包数的瞬时值，会抖（见「三、已验证」的漏洞数口径更正）。
+> **口径纠正（本条曾连错两次，这里留痕）**：我先前写过「10 条」「npm 10 → 4」
+> 「改前改后都是 6 条」，全都不成立。真实的改前基线是用 `c26f91a` 的 lock 离线
+> 重跑 `npm audit --package-lock-only --include=dev` 得到的：
+>
+> ```
+> 改前 metadata: {"info":0,"low":0,"moderate":2,"high":6,"critical":0,"total":8}
+> 改前受影响包 8 个：hono(1) miniflare(0) postcss-selector-parser(1) sharp(1)
+>                     source-map-js(1) undici(13) vite(5) wrangler(0)
+> 改前 advisory id 总数: 22
+> 改后 advisory id 总数:  6   （postcss-selector-parser 1 + vite 5）
+> 改后受影响包 2 个
+> ```
+>
+> 所以本轮的真实成果是 **22 → 6 条 advisory、8 → 2 个受影响包**。
+> 注意 `metadata.vulnerabilities.total` 是**受影响包数**（不是 advisory 数），
+> 且它会随传递条目是否被计入而抖动，**不能当硬指标**；稳定的口径是 advisory id 集合。
+> 剩下 2 个包（`vite` 5 条 + `postcss-selector-parser` 1 条 = 6 条）升不动，进入基线。
 
 漏洞均为**上游 v2.0.3 继承**，非本移植引入（`git diff a092297~1 HEAD -- package.json
 package-lock.json agent/go.mod agent/go.sum` 此前为空）。
 
-### npm（4 条根因修复，连带 2 条标记消失）
+### npm（4 个根因包修复，连带 2 条标记消失）
 
 | 包 | 变更 | 位置 | 消掉 |
 | --- | --- | --- | --- |
@@ -81,9 +101,10 @@ CI 的 `Setup Go` 用 `go-version-file: agent/go.mod`，会自动装 1.26.10，�
 > 因为本地 go 1.25.1 落后」—— 用 `GOTOOLCHAIN=go1.26.8` 精确复现后，
 > **CI 同版本同样报这 10 条**，原判断是错的。现已改为真修。
 
-## 二、剩余 4 条 npm 漏洞：显式基线（不是关掉门禁）
+## 二、基线里的 6 条 advisory（分布在 2 个包上）：显式基线（不是关掉门禁）
 
-`scripts/security-baseline.json` 逐条记录 4 条遗留（vite 5 条 + postcss 链 1 条根因），
+`scripts/security-baseline.json` 逐条记录 6 条遗留 advisory（vite 5 条 +
+postcss-selector-parser 1 条，对应 2 个受影响包），
 每条带 `blockedBy`（为什么升不动）、`exposure`（暴露面）、`followUp`（怎么消掉）。
 
 判定逻辑（`scripts/security-check.mjs`）：
@@ -124,7 +145,7 @@ npm update source-map-js --package-lock-only --ignore-scripts --registry=https:/
 packages: 358 -> 358
 added:   1  ["worker/node_modules/hono"]      ← hono 4.13.14 上移到 worker 层
 removed: 1  ["node_modules/hono"]
-version-changed: 29   ← 25 个 @img/sharp-* 平台包 + 2 个 sharp-libvips + sharp + undici + source-map-js
+version-changed: 29   ← 16 个 @img/sharp-* 平台包 + 10 个 sharp-libvips + sharp + undici + source-map-js
 git diff --stat c26f91a -- package-lock.json:  134 insertions(+), 134 deletions(-)
 ```
 
@@ -134,8 +155,8 @@ git diff --stat c26f91a -- package-lock.json:  134 insertions(+), 134 deletions(
 sharp 0.35.4 → 0.35.5              ✓ 目标
 undici 7.29.0 → 7.30.1             ✓ 目标
 source-map-js 1.2.1 → 1.2.2        ✓ 目标
-@img/sharp-* 0.35.4 → 0.35.5       ✓ sharp 的 25 个平台包
-@img/sharp-libvips-* 1.3.3 → 1.3.4 ✓ sharp 传递依赖
+@img/sharp-* 0.35.4 → 0.35.5       ✓ sharp 的 16 个平台包
+@img/sharp-libvips-* 1.3.3 → 1.3.4 ✓ sharp 的 10 个 libvips 包
 ```
 
 对比被废弃的重生成版本，它额外夹带了 2 个与安全无关的漂移（`postcss 8.5.28 → 8.5.31`、
@@ -169,7 +190,7 @@ rolldown 1.0.3 · lightningcss 1.32.0 · wrangler 4.116.0 · hono 4.13.14
 `release-agent.yml` 通过 `uses: ./ci.yml` 把这条 CI 当作发布的唯一前置门禁，
 所以必须保持硬失败。
 
-### 遗留 4 条为什么接受
+### 基线里的 6 条为什么接受
 
 - `vite` 5 条全部作用于**本地 dev server**（`launch-editor` 的 Windows 参数转义、
   编辑器 CLI 参数误解析、`fs.existsSync` 绕过、跨源脚本执行、`server.fs.allow` 越界）。
@@ -193,11 +214,13 @@ rolldown 1.0.3 · lightningcss 1.32.0 · wrangler 4.116.0 · hono 4.13.14
   npm audit: 2 known finding(s), all covered by the baseline (6 advisory id(s)).
   govulncheck: no vulnerabilities found.
   ```
-- **漏洞数口径更正**：advisory **恒定 6 条**，这是唯一稳定的指标。
-  `metadata.vulnerabilities.total` 统计的是**受影响包数**，实测在 **2 ~ 4 之间抖动**
-  （`postcss-nested` / `tailwindcss` 这类传递条目是否被计入会浮动），同一份 lock
-  连跑出现过 4、2、2。所以**不再写「10 → 4」这种硬指标**，真正稳定的对比是
-  「npm advisory 6 条」（改前后数量相同，但改后 4 条根因包已修，见下）+「Go 10 条 → 0 条」。
+- **漏洞数口径（第三次修正，前两次都写错了，留痕）**：
+  - 唯一稳定的指标是 **advisory id 集合**：改前 **22 条** → 改后 **6 条**。
+  - `metadata.vulnerabilities.total` 是**受影响包数**，且会随传递条目是否被计入而浮动，
+    同一份 lock 连跑出现过 4、2、2 —— **不能当指标**。
+  - 我先前的「10 条」「npm 10 → 4」「改前改后都是 6 条」**全部作废**。真实改前基线是
+    用 `c26f91a` 的 lock 离线跑 audit 得到的 `{moderate:2, high:6, total:8}` / 22 条 id
+    （`undici 7.29.0` 一个包就挂 13 条），改后是 `{total:2}` / 6 条 id。
 - **判别力实验（证明新测试非恒真）**：把 security 步骤改回 `continue-on-error: true`
   → `security-gate.test.mjs` 变 **1 fail**；恢复后全过。
 - **测试**：`scripts/security-gate.test.mjs` **16/16**（原 7 + rev2 新增 7 + rev3 新增 2）。
@@ -277,7 +300,19 @@ rolldown 1.0.3 · lightningcss 1.32.0 · wrangler 4.116.0 · hono 4.13.14
   ```
   本地只验证了无 `-race` 的 `go build` / `go vet` / `go test`（见下）。
   该步骤在 CI 的 `ubuntu-latest` 上才具备 CGO 条件，本轮为其首次以 go 1.26.10 运行。
-- **基线是有意为之的「已知不良状态」**：它让 4 条遗留漏洞得以长期存在。
+- **一处理论性残留 fail-open（rev4 发现，未修，已知且当前不可达）**：
+  `collectAdvisories` 只对**对象型** `via` 做 unmapped 判定；**字符串型** `via`
+  （语义是"漏洞属于上游那个包"）会被直接跳过，且不校验该包是否真在报告里。
+  rev4 用构造报告 `{基线内 moderate} + {ghost-holder: critical, via: ["ghost-pkg"]}`
+  实测 `exit 0`。真实 `npm audit` 的字符串 `via` 始终指向报告内存在的包
+  （改前 `miniflare via ["sharp","undici"]`、`wrangler via ["miniflare"]` 均成立），
+  所以**当前不可达**。作为纵深防御建议加一条不变量：字符串 `via` 必须命中
+  `report.vulnerabilities` 的某个 key，否则按 unmapped 处理 —— 本轮未做，留作后续。
+- **门禁隐式依赖 registry**：`security-check.mjs` 调 `npm audit` 未传 `--registry`，
+  本机全局 registry 是 npmmirror 时会 404 并 **fail closed**（不会假绿）。
+  GitHub Actions 默认 npmjs，CI 不受影响；本地须带 `npm_config_registry` 才能跑通。
+- **测试编号重复**：16 条测试全部以 `AUD-20` 开头，靠前缀无法区分新旧用例（纯命名问题）。
+- **基线是有意为之的「已知不良状态」**：它让 6 条遗留 advisory 得以长期存在。
   这是 boss 在「不升 tailwind major / 不动前端样式体系」前提下的选择，
   代价是这些风险只靠 `followUp` 字段跟踪，没有强制到期机制。
   若将来能删 `frontend/node_modules` 重装或做 tailwind 4 迁移，应同步清理基线并删条目。

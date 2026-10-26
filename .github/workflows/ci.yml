@@ -127,12 +127,14 @@ jobs:
       # 因此本步骤仍然是硬门禁，`release-agent.yml` 通过 `uses: ./ci.yml`
       # 复用它的结论也依然成立。
       #
-      # 已修复（10 → 4 条根因）：undici 7.30.1 / sharp 0.35.5 /
-      #   source-map-js 1.2.2 / hono 4.13.14。
+      # 已修复 4 个根因包（改前 22 条 advisory / 8 个受影响包 → 改后 6 条 / 2 个包）：
+      #   undici 7.30.1 / sharp 0.35.5 / source-map-js 1.2.2 / hono 4.13.14。
+      #   其中 undici 7.29.0 一个包就挂了 13 条 advisory。
       #   注意 miniflare 与 wrangler 没有自身漏洞，只是依赖了上面两个才被标记，
       #   故未升级它们 —— 升 wrangler 会改变 `wrangler types` 的口径，
       #   反而会打破 Lint 步骤的约定。
-      # 仍留在基线里的 4 条及原因见 scripts/security-baseline.json 的 blockedBy 字段。
+      # 仍留在基线里的 6 条 advisory（vite 5 + postcss-selector-parser 1，共 2 个包）
+      # 及原因见 scripts/security-baseline.json 的 blockedBy 字段。
       #
       # 本地复查（npmmirror 不支持 audit 端点，必须显式指定官方 registry）：
       #   npm audit --include=dev --registry=https://registry.npmjs.org

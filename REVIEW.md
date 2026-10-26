@@ -1,391 +1,270 @@
 <!-- reviewed-by: independent-subagent -->
-# 独立审议 (REVIEW) — 依赖漏洞修复 + 显式安全基线（rev3 · lock 重写专项）
+# 独立审议 (REVIEW) — 依赖漏洞修复 + 显式安全基线（rev4 · 整改复审）
 
-## 审议范围
-
-| 项 | 内容 |
-| --- | --- |
-| 被审提交 | `828f68c` fix(deps)…、`2fd3e01` docs(verify)… |
-| 基线对照提交 | `c26f91a`（`828f68c` 的父提交，才是真正「未改动 lock」的状态） |
-| 审议方 | 独立第三方，未参与实现 |
-| 环境 | Windows 11 / git bash / node v22.22.2 / npm 10.9.7 / go 1.25.1（借用 1.26.10 工具链） |
-| 干净快照 | `E:/工作站/_ci-verify`（`828f68c` detached worktree） |
-| 隔离实验目录 | `E:/工作站/_review-probe`（最小路径复现）、`E:/工作站/_review-linux-ci`（Linux 实装）、`E:/工作站/_review-gate`（门禁判别力副本） |
-
-**方法学纠正**：任务书给的 `git show HEAD~1:package-lock.json` 取到的是 `828f68c` 本身的 lock（`2fd3e01` 只改 VERIFICATION.md），它与当前文件逐字节等价，diff 必然为空。本审议改用 `c26f91a`：
-
-```
-$ cd "E:/工作站/cf-vps-monitor-src" && node difflock.mjs   # HEAD~1 版本 → 全 0
-packages count 385 -> 385 | added 0 removed 0 | version-changed 0
-$ git show c26f91a:package-lock.json > lock_old.json       # 正确基线
-packages count 358 -> 385 | added keys: 33 removed keys: 6 | version-changed entries: 31
-```
-
-主工作区含有他人未提交的 WIP（8 M + 2 ??），全程未执行 `git stash / checkout / reset`，未删除任何文件；`ci.yml` sha256 前后一致（见问题 3）。
+- 审议对象：`c26f91a..dd68182`（重点 `dd68182`），工作区 HEAD = `dd68182`
+- 审议员：reviewer-rev4（未参与实现）
+- 环境：Windows / git bash / Node v22.22.2，npm 走 `--registry=https://registry.npmjs.org`
+- 纪律：未执行 `git stash` / `checkout <branch>` / `reset` / `clean`，未删除任何文件，未在 `frontend/` 跑 `vite build`；所有实验在 `E:/工作站/_review-probe` 独立目录内进行
+- 判断依据：以下全部为我本人跑出的输出，未采信提交者叙述
 
 ---
 
-## 一、逐项核实
+## 一、rev3 阻断项闭环复核
 
-### 问题 1 — lock 重写是否安全
+### 阻断 1（lock 用「删文件重生成」替代定点更新）→ ✅ 已闭环
 
-#### 1a. 除 4 个目标包外，还有哪些包的解析版本变了
-
-**结论：❌ 有 2 处越界升级，无降级。**
+`git diff --stat c26f91a -- package-lock.json`：
 
 ```
-$ node difflock.mjs      # c26f91a → HEAD
-version-changed entries: 31
-  node_modules/sharp                 0.35.4 -> 0.35.5     ← 目标包
-  node_modules/undici                7.29.0 -> 7.30.1     ← 目标包
-  node_modules/source-map-js         1.2.1  -> 1.2.2      ← 目标包
-  node_modules/@img/sharp-*          0.35.4 -> 0.35.5     ← sharp 的 25 个平台包（预期）
-  node_modules/@img/sharp-libvips-*  1.3.3  -> 1.3.4      ← sharp 传递依赖（预期）
-  node_modules/postcss               8.5.28 -> 8.5.31     ← 越界
-  node_modules/nanoid                3.3.18 -> 3.3.20     ← 越界
+ package-lock.json | 268 +++++++++++++++++++++++++++---------------------------
+ 1 file changed, 134 insertions(+), 134 deletions(-)
 ```
 
-`hono` 不计入「版本变化」：它从 `node_modules/hono@4.13.7` 变成了 `worker/node_modules/hono@4.13.14`，在键层面表现为 1 增 1 删。
+268 行总量 / 134:134，与 rev3 要求的「270 行量级」一致（重生成版为 877 行）。
 
-越界的两个包**没有任何安全收益**。用最小路径重建的 lock（保留 postcss 8.5.28 / nanoid 3.3.18）跑出的 audit 与提交版完全同构：
-
-```
-$ npm audit --include=dev --json   # 最小路径 lock（postcss 8.5.28, nanoid 3.3.18）
-metadata {"info":0,"low":0,"moderate":3,"high":1,"critical":0,"total":4}
-  postcss-selector-parser moderate via ["GHSA-rj75-hqrm-r3gf"]
-  vite high via ["GHSA-698v-4r3x-3vcv","GHSA-r825-w8mm-5pxw","GHSA-587h-7wmj-h5pm","GHSA-9jrq-w75r-8gcw","GHSA-rq7h-c2jc-7f22"]
-```
-
-即：`postcss` 与 `nanoid` 的补丁级升级与本次安全修复无关，属「删 lock 重生成」的附带漂移。31 项版本变化中 29 项可由 4 个目标包完全解释。
-
-键层面的搬迁（33 增 / 6 删）除了 13 个 rolldown binding 与 9 个 lightningcss binding，还有 6 处纯层级搬移：
+自己写的结构比对（`git show c26f91a:package-lock.json` vs 当前）：
 
 ```
-REMOVED: frontend/node_modules/@rolldown/pluginutils   → ADDED: node_modules/@rolldown/pluginutils
-REMOVED: frontend/node_modules/tinyglobby              → ADDED: node_modules/tinyglobby
-REMOVED: frontend/node_modules/tinyglobby/node_modules/{fdir,picomatch} → ADDED: node_modules/{fdir,picomatch}
-REMOVED: node_modules/@rolldown/binding-linux-x64-gnu  → ADDED: frontend/node_modules/@rolldown/binding-linux-x64-gnu
-REMOVED: node_modules/hono                              → ADDED: worker/node_modules/hono
+lockfileVersion base/cur: 3 3
+packages count base/cur: 358 358
+added(1): [ 'worker/node_modules/hono' ]
+removed(1): [ 'node_modules/hono' ]
+version-changed count: 29
+   node_modules/@img/sharp-darwin-arm64 0.35.4 -> 0.35.5
+   ...（26 个 @img/sharp-* / @img/sharp-libvips-*）
+   node_modules/sharp 0.35.4 -> 0.35.5
+   node_modules/source-map-js 1.2.1 -> 1.2.2
+   node_modules/undici 7.29.0 -> 7.30.1
 ```
 
-`npm ls` 实测这些搬移没有产生冲突：`hono@4.13.14`、`fdir@6.5.0`、`picomatch@4.0.7`、`tinyglobby@0.2.17` 均可解析，`npm ci` EXIT=0（见 1c）。
+29 项**全部**落在 sharp 全家（`sharp` + 26 个 `@img/*`）+ `undici` + `source-map-js`，与 rev3 的要求逐项吻合。hono 的 1 增 1 删是层级搬移（根 → `worker/node_modules`），不是新增依赖。
 
-#### 1b. 新增 binding 的 os/cpu/optional 标记是否会误装
-
-**结论：✅ 标记正确，不会跨平台误装、不会体积膨胀。**
+越界升级核查：
 
 ```
-$ node bindings.mjs
-frontend/node_modules/@rolldown/binding-android-arm64 | optional=true | os=["android"] | cpu=["arm64"]
-frontend/node_modules/@rolldown/binding-darwin-arm64  | optional=true | os=["darwin"]  | cpu=["arm64"]
-...
-frontend/node_modules/@rolldown/binding-linux-x64-gnu | optional=true | os=["linux"]   | cpu=["x64"]
-frontend/node_modules/@rolldown/binding-win32-x64-msvc| optional=true | os=["win32"]   | cpu=["x64"]
-node_modules/@rolldown/binding-wasm32-wasi            | optional=true | os=undefined   | cpu=["wasm32"]
+postcss          8.5.28 -> 8.5.28 SAME
+nanoid           3.3.18 -> 3.3.18 SAME
+wrangler         4.116.0 -> 4.116.0 SAME
+frontend/node_modules/vite          8.0.16 -> 8.0.16
+frontend/node_modules/rolldown      1.0.3  -> 1.0.3
+frontend/node_modules/lightningcss  1.32.0 -> 1.32.0
+vite/rolldown/lightningcss/tailwind 相关条目数: 11 版本差异数: 0
 ```
 
-15 个 rolldown binding（14 个在 `frontend/node_modules/`，1 个 wasm32 在根）全部 `optional: true` 且带 `os`/`cpu`；`wasm32-wasi` 用 `cpu:["wasm32"]` 排除非 wasm 宿主。9 个新增 lightningcss binding 同样齐备。
+`postcss` 已回到 8.5.28、`nanoid` 已回到 3.3.18，`vite` / `rolldown` / `lightningcss` / `wrangler` 零变化 —— rev3 指出的两处「白送的升级」已彻底消除。
 
-实际安装验证（隔离目录，非 dry-run）：安装 linux 目标后，win32/darwin binding **根本不存在**：
+补充口径（比提交者描述更严）：按「任意字段变化」统计是 **30 个包**，第 30 个是 `worker`（其 `dependencies.hono` 由 `^4.13.7` 改成 `^4.13.14`），属预期内，不是隐藏漂移。
 
-```
-$ cd /e/工作站/_review-linux-ci && npm ci --os=linux --cpu=x64 --ignore-scripts --registry=https://registry.npmjs.org
-real 2m46s   CI_EXIT=0
+### 非阻断 1（`security-check.mjs` 部分映射 fail-open）→ ✅ 已闭环
 
-$ ls -d node_modules/@rolldown/* frontend/node_modules/@rolldown/*
-frontend/node_modules/@rolldown/binding-linux-x64-gnu
-frontend/node_modules/@rolldown/binding-linux-x64-musl
-node_modules/@rolldown/pluginutils
-（无任何 win32 / darwin binding，无 binding-wasm32-wasi）
-```
+代码层面（`scripts/security-check.mjs:127-182`）：`collectAdvisories` 现在返回 `{ found, unmapped }`，`runSecurityChecks` 在 `unmapped.length > 0` 时无条件抛错（早于基线放行判定），且 id 识别放宽为 `GHSA-[a-z0-9-]+|CVE-\d{4}-\d{4,}`。
 
-反向同理：Windows 本地只会装 `win32-x64-msvc`，不会下载 Linux 二进制。
-
-一处既有瑕疵（**非本次引入**）：全 lock 有 200 条条目缺 `integrity`（旧 lock 204 条），例如 `frontend/node_modules/rolldown`、`frontend/node_modules/lightningcss` 均无 `resolved`/`integrity`。这是上游继承的历史状态，本次反而净减 4 条，不计入本次缺陷。所有 `resolved` 主机均为 `registry.npmjs.org`（181 条），无镜像地址泄漏：
+我按 rev3 的原场景**自己写探针**（`E:/工作站/_review-probe/probe-failopen.mjs`，注入 `run`，走真实 `runSecurityChecks`）：
 
 ```
-resolved hosts: {"registry.npmjs.org":181}
-NEW entries with version but no integrity: 200
-OLD entries with version but no integrity: 204
+=== A 混合报告（基线项 + 无 id 的 critical） ===
+exit=1
+error: npm audit reported 1 advisory that could not be mapped to a GHSA/CVE id:
+  mystery-pkg: critical — mystery-pkg notice-42 (https://example.invalid/security/notice-42)
+Refusing to treat a partially unparseable report as clean.
+
+=== B CVE-only 且已基线化 ===            exit=0
+=== C 真实报告 6 条 id 全部基线内 ===    exit=0
+=== D 新增未基线化 GHSA ===              exit=1（列出 GHSA-zzzz-yyyy-xxxx vite: high）
+=== E 基线项被上调到 critical ===        exit=1（postcss-selector-parser: critical，baseline accepted moderate）
+=== F 字符串 via 不被误判为 unmapped === exit=0
+汇总: {"A_mixed":1,"B_cve_baselined":0,"C_real_all_baselined":0,"D_new_ghsa":1,"E_escalated":1,"F_string_via":0}
 ```
 
-#### 1c. Linux (ubuntu-latest x64 / node 24) 能否解析到 rolldown 原生 binding
+- rev3 的放行场景（A）现在 **exit=1** ✅
+- 放宽到 CVE 后 CVE-only **能正常匹配基线**（B=0），不是一律失败 ✅
+- 反向破坏检查：真实全基线报告（C）仍放行；`via` 为上游包名字符串时（F）不被误判为 unmapped；新增/提级仍阻断（D/E）✅
 
-**结论：✅ 能，且经真实安装（非仅 dry-run）确认。**
+### 非阻断 2（VERIFICATION 三处失准）→ ⚠️ 部分改正，且引入了新的数字失准
 
-```
-$ cd "E:/工作站/_ci-verify" && npm ci --dry-run --os=linux --cpu=x64 --registry=https://registry.npmjs.org --ignore-scripts
-added 382 packages in 932ms
-EXIT=0
-```
-
-更强的验证（隔离目录真实安装，见 1b）：`npm ci --os=linux --cpu=x64` EXIT=0，`frontend/node_modules/@rolldown/binding-linux-x64-gnu@1.0.3` 落地并被 `rolldown` 正确解析。
-
-**但 VERIFICATION 的举证方式不成立**（见问题 4）：dry-run 日志会同时列出**所有平台**的包——
-
-```
-add @cloudflare/workerd-windows-64 1.20260730.1
-add @cloudflare/workerd-linux-64   1.20260730.1
-add @rolldown/binding-win32-x64-msvc 1.0.3
-add @rolldown/binding-linux-x64-gnu  1.0.3
-```
-
-所以「日志里出现 Linux 专属包」**不能**证明「Linux 上条目齐备」，因为同一份日志里也出现了 Windows 专属包。结论正确，论据错误。
+| rev3 指出的失准 | 当前状态 | 证据 |
+| --- | --- | --- |
+| 「`npm ls` 无 extraneous」 | ✅ 已改正为「有 4 个 extraneous」 | 我实测 `npm ls --all \| grep -c extraneous` = **4**，明细 `@emnapi/runtime` / `@emnapi/wasi-threads` / `@img/sharp-wasm32` / `@tybys/wasm-util`，与文档完全一致 |
+| 「binding 16 个」 | ✅ 该表述已消失，改为「误装检查」 | `grep binding VERIFICATION.md` 只剩 linux binding 落地/解析相关行 |
+| 「npm 10 → 4」硬指标 | ⚠️ 「10 → 4」字样已撤回，但替换成了**同样不成立**的新口径 | 见下节「非阻断发现 1」 |
 
 ---
 
-### 问题 2 — 是否存在更保守的替代方案（关键）
+## 二、逐项核实结果
 
-**结论：✅ 存在，且实测可行。因此删 lock 全量重生成属多余风险。**
+### 2.1 lock 定点更新（问题 1）
 
-实验设计（完全隔离于主工作区）：取 `c26f91a` 的整棵树（旧 lock），只把 3 个 `package.json` 换成 `HEAD` 版本（含 `overrides` 与 `worker` 的 hono 版本线），然后做定点安装：
+| 要求 | 实测 | 结论 |
+| --- | --- | --- |
+| packages 358→358 | `358 358` | ✅ |
+| added/removed 各 1（hono 搬移） | `added(1) ['worker/node_modules/hono']` / `removed(1) ['node_modules/hono']` | ✅ |
+| version-changed 29 且全为目标包 | 29，全部 `sharp`/`@img/*`/`undici`/`source-map-js` | ✅ |
+| postcss 回 8.5.28、nanoid 回 3.3.18 | 均 SAME | ✅ |
+| rolldown/lightningcss/vite/wrangler 零变化 | 11 个相关条目 0 差异 | ✅ |
+| diff 在 270 行量级 | 268（134/134） | ✅ |
 
-```
-$ cd /e/工作站/_review-probe && npm install --package-lock-only --ignore-scripts --registry=https://registry.npmjs.org
-up to date, audited 358 packages in 7s
-EXIT=0
-   → 已生效：sharp 0.35.5 / undici 7.30.1 / hono 4.13.14
-   → 未生效：source-map-js 仍 1.2.1（overrides 变更未被这次 resolve 采纳）
+### 2.2 fail-open（问题 2）
 
-$ npm update source-map-js --package-lock-only --registry=https://registry.npmjs.org
-4 vulnerabilities (3 moderate, 1 high)
-source-map-js = 1.2.2
-```
+见上「非阻断 1」：A/B/C/D/E/F 六个场景全部符合预期。新增的两条测试也确实走真实 `runSecurityChecks`（`fixture` 会 `import` 被测模块并注入 `run`），不是进程内桩。
 
-最终与旧 lock 的差异：
+### 2.3 VERIFICATION 准确性（问题 3）
 
-```
-$ node diff(old, minimal)
-count 358 -> 358 | added 1 removed 1 | versionChg 29
-  added:   worker/node_modules/hono
-  removed: node_modules/hono
-  （其余 28 项 = sharp 全家 + undici + source-map-js 的平台/传递包）
-  （rolldown / lightningcss / vite / postcss / nanoid 条目零变化）
-```
+**已与实测一致的**（我逐条复核）：
+- 「`npm run security:check` → EXIT=0 / 2 known findings / 6 advisory id(s)」→ 我的实跑完全相同
+- 「`security-gate.test.mjs` 16/16」→ 实跑 16/16
+- 「13 个 step，`continue-on-error` 仅出现在第 122 行注释」→ 实测 13 个 step，全文 `continue-on-error` 仅 1 处且在注释里，`id:` 出现 0 次
+- 「`npm ci --dry-run` EXIT=0」→ 实测 EXIT=0
+- 「extraneous 4 个」→ 实测 4 个，名字一致
+- 「Linux 真实安装 EXIT=0 + rolldown 解析到 binding-linux-x64-gnu + 无 win32/darwin 误装」→ 我在全新目录 `_review-probe/linuxinst` 用当前 lock 实跑，1m39s，EXIT=0：
+  ```
+  ls node_modules/@rolldown/            → binding-linux-x64-gnu
+  -rw-r--r-- 21949232  .../rolldown-binding.linux-x64-gnu.node
+  grep -E "win32|darwin" → 无 win32/darwin
+  createRequire(frontend/node_modules/rolldown/package.json).resolve(...)
+    → E:\...\_review-probe\linuxinst\node_modules\@rolldown\binding-linux-x64-gnu\package.json
+  ```
+- 「134/134 行、358→358、29 项、vite 8.0.16 未升」→ 全部属实
 
-安全结论与提交版**完全一致**：
+**仍失准 / 新失准**：见「四、非阻断发现」1~4（数字口径错、`@img` 拆分错、`resolved` 主机无误）。
 
-```
-metadata {"info":0,"low":0,"moderate":3,"high":1,"critical":0,"total":4}
-advisory ids (6): GHSA-rj75-hqrm-r3gf, GHSA-698v-4r3x-3vcv, GHSA-r825-w8mm-5pxw,
-                  GHSA-587h-7wmj-h5pm, GHSA-9jrq-w75r-8gcw, GHSA-rq7h-c2jc-7f22
-source-map-js entries: [ 'node_modules/source-map-js@1.2.2' ]   # 无重复版本
-package count: 358
-```
-
-并且在 **linux/x64 上真实安装通过**，且能解析到 rolldown 原生 binding（这条最关键，用来反驳「旧混杂布局在 CI 上不可用」）：
+### 2.4 回归（问题 4）
 
 ```
-$ cd /e/工作站/_review-probe && npm ci --os=linux --cpu=x64 --ignore-scripts --registry=https://registry.npmjs.org
-real 1m30s   CI_EXIT=0
-
-$ node -e "createRequire('.../frontend/node_modules/rolldown/package.json').resolve('@rolldown/binding-linux-x64-gnu/package.json')"
-binding resolved to: E:\工作站\_review-probe\node_modules\@rolldown\binding-linux-x64-gnu\package.json
-binding pkg: 1.0.3
+$ node --test scripts/security-gate.test.mjs
+1..16
+# tests 16
+# pass 16
+# fail 0
 ```
 
-即：旧 lock 的「win32 在 frontend、linux 在根」布局，在 Node 的向上查找规则下**本来就能解析**（`frontend/node_modules/rolldown` → `frontend/node_modules` → 根 `node_modules` 命中）。VERIFICATION 称其为「偶然正确」，但这次重写把它变成「结构自洽」——**是整洁度收益，不是功能修复**，CI 从未因此失败过。
-
-**对提交者自述的核实**：`vite` 8 次升不上去是真的（vite 最终仍是 8.0.16），但**本次提交并没有升 vite**（vite 留在基线里）。而本次提交真正需要的 4 个包，用上面两条命令就能从旧 lock 落地。所以「唯一成功手段是删掉 package-lock.json 重新生成」这一说法，对**本次实际交付的变更范围**而言不成立。这也解释了那 8 次尝试为何都以 `up to date` 收场却仍看不到效果：`npm install` 会把 `up to date` 打印出来，同时**静默应用**了 hono/sharp/undici 的改动（`source-map-js` 需要额外 `npm update` 推一把）；若只看 `vite` 版本号，就会得出「全都没生效」的错误结论。
-
----
-
-### 问题 3 — 安全门禁是否仍然硬阻断
-
-**结论：✅ 硬阻断成立，无 `continue-on-error`、无 `id`、无 `|| true`。**
-
 ```
-$ grep -c "^      - name:" .github/workflows/ci.yml
-13
-$ grep -n "id:" .github/workflows/ci.yml
-（空）
-$ grep -rn "continue-on-error|\|\| true|set +e|exit 0" .github/ scripts/
-.github/workflows/ci.yml:122:  # 处理方式不是 continue-on-error（…）      ← 仅注释
-scripts/security-baseline.json:8: "与其用 continue-on-error 把整道门禁关掉…"  ← 仅文案
-scripts/security-gate.test.mjs:200,208: 测试名与断言正则
-```
-
-门禁实跑（默认 registry 是 npmmirror，不支持 audit 端点 → **fail closed**，不会假绿）：
-
-```
-$ npm run security:check
-npm audit returned an incomplete or inconsistent report.
-EXIT=1
-
 $ npm_config_registry=https://registry.npmjs.org npm run security:check
 npm audit: 2 known finding(s), all covered by the baseline (6 advisory id(s)).
 govulncheck: no vulnerabilities found.
 EXIT=0
 ```
 
-fail-closed 矩阵（读码 + 单测双重确认）：
-
-| 情形 | 行为 | 证据 |
-| --- | --- | --- |
-| 基线外 advisory | 失败 | `security-check.mjs:162-168`；测试 ② |
-| 基线缺失/损坏/id 非法/severity 非法 | 失败 | `:72-100`；测试 ③ |
-| 基线 severity 被上调 | 失败 | `:158-161, 169-176`；测试 ⑤ |
-| 未知 severity 标签 | 按最高级处置（必然触发上调） | `:10` `?? Number.POSITIVE_INFINITY` |
-| 报告有漏洞但**一条** id 都映射不出 | 失败 | `:145-150`；测试 ⑥ |
-| govulncheck 异常退出 / 非 0,3 | 失败 | `:25-27`；测试 ⑦ |
-| govulncheck exit 3 却输出「无漏洞」 | 判自相矛盾，失败 | `:29-31` |
-| **部分** advisory 无法映射（混合场景） | **放行** | ❗见非阻断发现 1 |
-
-判别力实验（在 `_review-gate` 副本中注入 `continue-on-error: true`，主工作区文件未动）：
-
 ```
-$ node --test scripts/security-gate.test.mjs        # 副本原始
-# tests 14 / # pass 14 / # fail 0
-
-$ # 给 security 步骤注入 continue-on-error: true
-$ node --test scripts/security-gate.test.mjs
-not ok 11 - AUD-20 the reusable CI gate keeps security as a hard step, not continue-on-error
-            continue-on-error: true
-# tests 14 / # pass 13 / # fail 1
-
-$ # 恢复副本后
-# pass 14 / # fail 0
-
-$ sha256sum -c ci.sha.before
-.github/workflows/ci.yml: OK          # 3406a8fab10ad6d2…
+$ npm_config_registry=https://registry.npmjs.org npm ci --dry-run
+EXIT=0
 ```
 
-断言**有真实判别力**，不是恒真背书。
+```
+step 数: 13
+continue-on-error 出现次数: 1   （第 122 行注释）
+id: 出现次数: 0
+```
+
+四项全部通过。
+
+### 2.5 未被发现的问题（问题 5）
+
+- lock 中 `resolved` 主机：`{"registry.npmjs.org": 150}`，其余 2 条是 workspace 软链（`resolved: "worker"` / `"frontend"`），**无镜像泄漏**。
+- 基线 6 条 id 与实跑严格一致、无多余放行：
+
+```
+real ids: 6 baseline ids: 6
+GHSA-rj75-hqrm-r3gf baseline=moderate real=moderate pkg=postcss-selector-parser pkgMatch=true
+GHSA-698v-4r3x-3vcv baseline=moderate real=moderate pkg=vite pkgMatch=true
+GHSA-r825-w8mm-5pxw baseline=moderate real=moderate pkg=vite pkgMatch=true
+GHSA-587h-7wmj-h5pm baseline=high     real=high     pkg=vite pkgMatch=true
+GHSA-9jrq-w75r-8gcw baseline=low      real=low      pkg=vite pkgMatch=true
+GHSA-rq7h-c2jc-7f22 baseline=moderate real=moderate pkg=vite pkgMatch=true
+（无 extra / 无 missing）
+```
+
+  config 里 `overrides` 与 lock 解析结果自洽：`hono@4.13.14` 落在 `worker/node_modules/hono`，`worker.dependencies.hono = ^4.13.14`；`npm ls` 显示 `sharp@0.35.5 overridden` / `undici@7.30.1 overridden` / `source-map-js@1.2.2 overridden`。
+- 未发现新的 fail-open；但发现一条**理论性残留**（非阻断 2）与两处**文档/注释口径错误**（非阻断 1、3）。
 
 ---
 
-### 问题 4 — VERIFICATION.md 的数字是否属实
+## 三、阻断项
 
-| 声明 | 实测 | 判定 |
-| --- | --- | --- |
-| ci.yml 有 13 个 step | `grep -c "^      - name:"` = **13** | ✅ |
-| `security-gate.test.mjs` 14/14 | `# tests 14 / # pass 14 / # fail 0` | ✅ |
-| 漏洞数 Go 10→0 | `govulncheck: no vulnerabilities found.`（go1.26.10 工具链） | ✅ |
-| 漏洞数 npm 10→4 | 见下，**计数不稳定** | ❌ 失准 |
-| `Check migration drift` 干净快照 EXIT=0 | 已复现（见下） | ✅ |
-| lock 682 增 / 195 删 | `git diff --stat c26f91a HEAD` = `682 insertions(+), 195 deletions(-)` | ✅ |
-| 382 个包可解析 | `added 382 packages`，EXIT=0 | ✅ |
-| rolldown binding「16 个，全部落在 `frontend/node_modules/`」 | 实为 **15 个**（14 在 frontend + 1 个 wasm32 在根） | ❌ 失准 |
-| `npm ls` 无 `invalid` / `UNMET` / `extraneous` | 实测有 **4 个 extraneous** | ❌ 失准 |
+无。
 
-**npm 漏洞计数**：同一份 lock、同一个命令，连续三次跑出不同总数（`4` 一次、`2` 两次），advisory id 恒为 6 条：
-
-```
-metadata {"info":0,"low":0,"moderate":3,"high":1,"critical":0,"total":4}   # probe / 首次
-metadata {"info":0,"low":0,"moderate":1,"high":1,"critical":0,"total":2}   # 主工作区两次
-advisory ids (6): …（两次完全相同）
-npm audit: 4 known finding(s), all covered by the baseline (6 advisory id(s)).
-npm audit: 2 known finding(s), all covered by the baseline (6 advisory id(s)).
-```
-
-`metadata.vulnerabilities.total` 统计的是受影响**包**数（`postcss-nested` / `tailwindcss` 是否被计入会浮动），不是 advisory 数。正确表述应为「**advisory 稳定在 6 条**，包计数 2~4 浮动」。写死「10→4」把它当成硬指标，后续核对会被这个抖动反复打脸。
-
-**Go 侧的工具链一致性我也确认过**（这条是提交者被上一轮自我推翻的点，值得复核）：
-
-```
-$ cd agent && go version
-go version go1.26.10 windows/amd64        # GOTOOLCHAIN=auto 拉到与 go.mod 相同的版本
-$ cd .. && npm_config_registry=https://registry.npmjs.org npm run security:check
-govulncheck: no vulnerabilities found.
-```
-
-即「Go 10→0」是在 **go1.26.10**（与 CI `go-version-file: agent/go.mod` 一致）下测得的，不是本地旧工具链的假绿。
-
-**`Check migration drift` 复现**（`828f68c` 干净快照）：
-
-```
-$ cd /e/工作站/_ci-verify && git diff --exit-code -- worker/src/generated/supabase-migrations.ts
-EXIT=0                      # status 显示 M，但内容 diff 为空 —— 确系行尾假象，声明属实
-$ npm run build:migrations
-Generated 10 Supabase migrations.      GEN_EXIT=0
-$ git diff --exit-code -- supabase/ worker/src/generated/
-DRIFT_EXIT=0
-```
-
-**`npm ls` 声明不成立**（主工作区）：
-
-```
-$ npm ls --all | grep -Ei "invalid|UNMET|extraneous"
-├─┬ @emnapi/runtime@1.11.3 extraneous
-├─┬ @emnapi/wasi-threads@1.2.1 extraneous
-├─┬ @img/sharp-wasm32@0.35.5 extraneous
-├─┬ @tybys/wasm-util@0.10.4 extraneous
-│ ├── UNMET OPTIONAL DEPENDENCY @rolldown/binding-linux-x64-gnu@1.0.3
-```
-
-`UNMET OPTIONAL DEPENDENCY` 属正常（跨平台可选依赖），但 4 个 `extraneous` 是真实偏差：本地 `node_modules` 与入库 lock 不同步（`@emnapi/runtime@1.11.3` 在 lock 里只以 `binding-wasm32-wasi/node_modules/@emnapi/runtime@1.10.0` 形式存在）。`npm ci` 会清空重装，不影响 CI；但「无 extraneous」这句话在当前工作区是假的，写进 VERIFICATION 就是失准。
-
-**`16 个 binding` 声明自相矛盾**：同一份文档第 98 行写「16 个，全部落在 `frontend/node_modules/`」，第 115 行又写「根 `node_modules/@rolldown/binding-wasm32-wasi`」。实测 15 个，14 在 frontend、1 在根。
+rev3 的唯一阻断项（lock 重生成）已用定点更新替换，并经我独立比对证实：358→358、1 增 1 删、29 项全部为目标包、`postcss`/`nanoid`/`vite`/`rolldown`/`lightningcss`/`wrangler` 零漂移、diff 268 行。fail-open 也已用我自写探针确认修复，且未反向破坏正常放行路径。
 
 ---
 
-### 问题 5 — 是否有「为让 CI 变绿而弱化门禁」的痕迹
+## 四、非阻断发现
 
-**结论：✅ 未发现伪造、注释掉断言、放宽阈值或跳过步骤。**
+### 1. VERIFICATION 的漏洞计数口径仍然是错的（第三次同类问题）
 
-- 无 `continue-on-error`、无 `id`、无 `|| true`、无 `set +e`、无 `if: always()`（`release-agent.yml` 侧有断言守护）。
-- `security-baseline.json` 的 6 条 id 与实跑报告的 6 条 **完全一致，无多余放行**；`goVulnerabilities: []` 为空数组（Go 侧零放行）。
-- 断言未被削弱，反而新增了 4 条针对「基线被滥用」的测试；注入 `continue-on-error` 会变红（问题 3 已验证）。
-- 唯一的边界放松是扫描器退出码受理范围：npm `{0,1}`、govulncheck `{0,3}`。这是**必要的**——`npm audit` 一有发现就 exit 1、`govulncheck` 一有发现就 exit 3，不放宽则基线判定永远不可达。放宽处都由报告内容校验兜底（`total>0 但解析不出 id` → 失败；`非零退出却报干净` → 判矛盾失败）。
+提交者撤掉了「10 → 4」，但替换成的新说法同样不成立：
+
+- `VERIFICATION.md:36-39`「npm 侧改前改后**都是 6 条 advisory**…剩下 4 个包（vite 5 条 + postcss-selector-parser 1 条）」
+- `VERIFICATION.md:84`「剩余 **4 条** npm 漏洞」、`:86`「逐条记录 **4 条** 遗留」、`:172`「遗留 **4 条**」
+- `VERIFICATION.md:200`「npm advisory **6 条**（改前后**数量相同**）」
+- `.github/workflows/ci.yml:131`「已修复（10 → 4 条根因）… 仍留在基线里的 **4 条**」
+- `scripts/security-baseline.json:5`「继承了 **10 条** 依赖漏洞」
+
+我对 `c26f91a` 的 lock 做离线 audit（`npm audit --package-lock-only --include=dev`，与门禁同一口径）：
+
+```
+=== c26f91a（改前） ===
+total packages: 8  advisory ids: 22
+[["hono",1],["miniflare",0],["postcss-selector-parser",1],["sharp",1],
+ ["source-map-js",1],["undici",13],["vite",5],["wrangler",0]]
+
+=== 当前（改后） ===
+metadata: {"info":0,"low":0,"moderate":1,"high":1,"critical":0,"total":2}
+adv ids: 6   （postcss-selector-parser 1 + vite 5）
+```
+
+即真实是 **22 条 advisory / 8 个受影响包 → 6 条 / 2 个包**（`undici 7.29.0` 单包就挂 13 条），基线文件里也确实是 **6 条**。因此「改前改后都是 6 条」「剩余 4 条」「10 条」全部不成立，`@img` 拆分也不成立（见下条）。这条错误方向上是**低估**了本轮修复效果，不影响门禁正确性，但属于治理文档的事实性错误，建议按 22 → 6、8 → 2（基线 6 条）统一改一遍，并同步 `ci.yml` 注释与 `security-baseline.json` 的 `$why`。
+
+### 2. `@img` 平台包数量拆分错
+
+`VERIFICATION.md:127` 写「29 ← **25 个 @img/sharp-* 平台包** + **2 个 sharp-libvips** + sharp + undici + source-map-js」，三项相加 25+2+1+3=31、内部也对不上 29。实测：
+
+```
+@img/sharp-* 总数 26 其中 libvips 10 平台包(非libvips) 16
+```
+
+正确拆分是 **16 个平台包 + 10 个 libvips + sharp + undici + source-map-js = 29**。同一错误在 `:137`「sharp 的 25 个平台包」重复出现。
+
+### 3. 一处残留的理论性 fail-open：`via` 为字符串且指向报告外的包
+
+`collectAdvisories` 只对「对象型 via」做 unmapped 判定，字符串型 via 被当作「漏洞属于别处」直接跳过，且不校验该包是否真的在报告里。我构造的反例（`_review-probe` 探针 G）：
+
+```
+报告 = { 基线内 moderate 一条 } + { ghost-holder: critical, via: ["ghost-pkg"] }
+→ exit=0（静默放行）
+```
+
+真实 `npm audit` 输出中 `via` 字符串始终指向报告内存在的包（改前报告里 `miniflare via ["sharp","undici"]`、`wrangler via ["miniflare"]` 均成立），因此**当前不可达**，不构成实际放行；但作为纵深防御，建议加一条不变量：字符串 via 必须命中 `report.vulnerabilities` 的某个 key，否则按 unmapped 处理。
+
+### 4. 门禁隐式依赖 registry 配置（已知、已披露，仅备注）
+
+`security-check.mjs` 调 `npm audit` 时未传 `--registry`，本机全局 registry 为 npmmirror 时会 404 而 fail closed：
+
+```
+npm warn audit 404 Not Found - POST https://registry.npmmirror.com/-/npm/v1/security/audits/quick
+```
+
+GitHub Actions 默认 registry 为 npmjs，CI 不受影响；本地必须带 `npm_config_registry` 才能跑通，文档已多处说明。属既有行为，不阻断。
+
+### 5. 测试编号重复（纯命名）
+
+`security-gate.test.mjs` 里 16 条测试全部以 `AUD-20` 开头（新增两条也是 `AUD-20 ...`），无法靠前缀区分新旧用例，建议后续改用序号。
 
 ---
 
-## 二、阻断项
+## 五、未验证
 
-### 阻断 1 — `package-lock.json` 应回退为最小差异版本（682 增 / 195 删 无正当理由）
-
-**事实**：本次变更只修 4 个包，且 vite 最终没有升（留在基线）。用「旧 lock + 新 `package.json`」的定点更新即可达成**完全相同**的安全结论（6 条 advisory、`npm ci` 在 linux/x64 实装通过、rolldown 原生 binding 正常解析），差异仅 **29 项版本变化 / 1 增 1 删**，2026-10-27 实测：
-
-```
-npm install --package-lock-only   → 29 处版本变化，其中 28 处是 4 个目标包的平台/传递包
-npm update source-map-js          → 补上 overrides 未自动生效的那一条
-npm ci --os=linux --cpu=x64       → CI_EXIT=0，binding 解析到 node_modules/@rolldown/binding-linux-x64-gnu@1.0.3
-```
-
-**因此「删 lock 重生成是唯一手段」这一核心论证被实验推翻**，而它正是 682/195 的唯一辩护理由。
-
-**残留风险（非理论）**：重生成额外带入 2 个与安全无关的补丁级升级（`postcss 8.5.28→8.5.31`、`nanoid 3.3.18→3.3.20`）与 6 处包层级搬移。这些改动在「修 4 个漏洞」的名义下进入主干，却不在这份提交的审查范围与测试范围内（本次未跑 `vite build` 与 532/150 测试来证明搬移无损，见「未验证」）。用收益换风险不划算。
-
-**具体替代做法**（可直接执行，已验证）：
-
-```bash
-git checkout c26f91a -- package-lock.json
-npm install --package-lock-only --registry=https://registry.npmjs.org   # 落 sharp/undici/hono
-npm update source-map-js --package-lock-only --registry=https://registry.npmjs.org
-npm ci --registry=https://registry.npmjs.org                            # 校验 lock 与树一致
-npm run security:check                                                  # 期望 EXIT=0，6 条 advisory
-git diff --stat                                                         # 期望 ~29 项版本变化
-```
-
-预期 lock 规模：358 条（当前 385 条），`git diff` 从 877 行降到 ~80 行量级。
+- **真实 GitHub CI 是否转绿**：未 push，无法验证。`Check migration drift` 与 `Agent data race check` 在本轮仍是首次真实执行（本地无 C 编译器）。
+- **`vite build` EXIT=0**：按纪律不在 `frontend/` 内执行（会触发批量删除保护），未复验；`npm ci --os=linux` 真装成功只证明 lock 可安装性，不等于构建通过。
+- **worker 532/532、frontend 150/150**：未复验。当前主工作区 `node_modules` 与入库 lock 已不同步（`npm ci --dry-run` 显示会 `postcss 8.5.31 => 8.5.28`、`nanoid 3.3.20 => 3.3.18`），且 `worker/src/utils/cf-client.ts` 存在他人未提交 WIP 和新增 `cf-client.test.mjs`，此时跑测试无法归因，故不复跑也不采信。
+- **`tsc --noEmit` 0 错、Go `build/vet/test` 全绿**：同上原因未复验；Go 侧仅间接确认工具链可用（`govulncheck` 在门禁内实跑返回 `No vulnerabilities found.`）。
+- **Linux 上实际跑测试**：只做了安装与 `@rolldown/binding-linux-x64-gnu` 解析验证。
 
 ---
 
-## 三、非阻断发现
+## 六、结论
 
-1. **`security-check.mjs` 在「部分 advisory 无法映射」时会 fail open。** 代码只校验「`total>0` 且**一条都没**映射出」（`:145`），混合场景下无 `GHSA-` URL 的 advisory 被静默丢弃。实测（独立探针，未改仓库文件）：
+**PASS**（阻断 0）
 
-   ```
-   [log] npm audit: 2 known finding(s), all covered by the baseline (1 advisory id(s)).
-   RESULT: exit 0 => 门禁放行了一条 critical 且无法映射的 advisory
-   ```
-
-   这直接削弱了「报告无法映射 advisory → fail closed」的表述。建议改为：统计 `via` 对象总数，与成功映射数不等即失败。
-2. **VERIFICATION 三处失准**（已在问题 4 逐条列出）：`npm ls 无 extraneous`、`16 个 binding 全部落在 frontend/`、`npm 10→4` 的计数稳定性。另有举证方式问题：`npm ci --dry-run` 日志同时列出各平台包，不能作为「Linux 完整」的证据（结论碰巧正确，但论据无效）。
-3. **本地 `node_modules` 与入库 lock 不同步**（4 个 extraneous）。建议提交前跑一次 `npm ci` 再复验，否则任何基于本地树的 `npm ls` / `npm audit -w` 结论都不可信。
-4. **基线没有到期机制**。`security-baseline.json` 的 6 条只靠 `followUp` 文字跟踪，vite 那条 `high` 已注明「优先处理」但无强制。建议加一个 `reviewBy` 日期字段，超过日期即 fail。
-
-## 四、未验证（如实披露）
-
-- **真实 GitHub CI 是否转绿**：未 push，无法验证。
-- **`vite build` / worker 532 / frontend 150**：未复跑（主工作区有他人 WIP，且本机 `vite build` 会触发批量删除保护）。因此「lock 层级搬移对构建无影响」这一点，我只验证到 `npm ci` 与模块解析层面，**未验证到构建产物**。
-- **`Agent data race check`**：本机缺 gcc，无法执行（与提交者披露一致）。
-- **node 24 / npm 11**：本地为 node 22.22.2 / npm 10.9.7，Linux 实装用 `--os=linux --cpu=x64` 模拟，非真实 ubuntu runner。
-
-## 五、结论
-
-安全修复本身是扎实的：4 个包真修、Go 工具链真升、基线逐 advisory 白名单、门禁硬阻断、防回归断言有真实判别力、无任何伪造或弱化痕迹。这些我都独立复现过，可以背书。
-
-但本次提交捆绑的 **lock 全量重生成是多余风险**：它用一个已被证伪的必要性论证（「唯一手段」），换来了 682/195 的改动面、2 个越界升级、6 处层级搬移，却没有带来任何安全增量。以「增量审议」的尺度衡量，这属于把不可审计的漂移塞进了一个本来可以只有 30 行的改动里。
-
-**REJECT（阻断 1）** — 回退 `package-lock.json` 到最小差异版本，其余改动（`package.json` overrides、`worker/package.json`、`agent/go.mod`、`security-baseline.json`、`security-check.mjs`、`security-gate.test.mjs`、`ci.yml` 注释）可原样保留。改完后只需补一条 `npm ci --os=linux --cpu=x64` 的实装证据，即可转 PASS。
+- rev3 阻断 1（lock 重生成）：已改为定点更新，结构差异与 rev3 要求逐项吻合（358→358、1 增 1 删、29 项全为目标包、零越界升级、268 行 diff）。
+- rev3 非阻断 1（fail-open）：已修，且我用自己的探针复现了原场景（exit=1），同时确认 CVE-only 可匹配、正常全基线报告仍放行、新增/提级仍阻断。
+- rev3 非阻断 2（VERIFICATION 失准）：extraneous 与 binding 两项已改正；但漏洞计数口径仍错，并新增 `@img` 拆分错误（见非阻断 1、2），建议在本轮之后单独更正文档/注释，不必再为此阻塞功能整改。
+- 回归项（16/16 测试、security:check EXIT=0 且 6 条 advisory、13 个 step 无 `continue-on-error`/无 `id`、`npm ci --dry-run` EXIT=0）全部通过；lock 无镜像泄漏，基线与实跑 6 条严格一致无多余放行。
