@@ -281,26 +281,57 @@ rolldown 1.0.3 · lightningcss 1.32.0 · wrangler 4.116.0 · hono 4.13.14
 | rev3 | **部分** advisory 无法映射时会整体放行（`total>0` 但 `found.size>0` 就过），一条读不出 id 的 critical 能躲在可映射的邻居后面 | `collectAdvisories` 额外返回 `unmapped`，任意一条映射不出即失败；id 识别放宽到 CVE，避免误杀 |
 | rev3 | `package-lock.json` 大范围重生成（682/195）夹带 2 个越界升级 | 回退为定点更新，134/134 行，零越界 |
 
+## 真实 CI 结果（已收口）
+
+**run [40366717973](https://github.com/wendu121/cf-vps-monitor/actions/runs/40366717973)
+· commit `93339cb` · 18 个步骤全绿 · 6m38s。** 这是本轮整条修复链的终点：
+
+```
+✓ Install dependencies   ← 定点版 lock 在真实 ubuntu runner 上装成功
+✓ Lint                   ← wrangler types --check 口径保持（未升 wrangler 的收益）
+✓ Build                  ← vite build 在 Linux 上通过（lock 布局可用的最终证明）
+✓ Test
+✓ Installer service account permissions
+✓ Agent root collector permissions
+✓ Agent data race check              ← 首次真实执行（go 1.26.10 + CGO）
+✓ Dependency and toolchain security  ← 首次转绿
+✓ Check migration drift              ← 首次真正执行（此前一直被 security 挡着）
+```
+
+关键步骤的**CI 实际输出**（与本地预测逐字一致）：
+
+```
+[Dependency and toolchain security] GOTOOLCHAIN: local
+npm audit: 2 known finding(s), all covered by the baseline (6 advisory id(s)).
+govulncheck: no vulnerabilities found.
+[Agent data race check]  ok  github.com/cf-vps-monitor/agent  30.004s
+[Test]                   ok  github.com/cf-vps-monitor/agent  15.384s
+[Check migration drift]  Generated 10 Supabase migrations.
+```
+
+`GOTOOLCHAIN: local` 说明 CI 用 `go-version-file: agent/go.mod` 装的就是 1.26.10，
+不是靠自动下载兜底 —— 「升级 Go 工具链消掉 10 条 GOVULN」这条路在 CI 上确认成立。
+
 ## 未验证 / 需披露
 
-- **真实 GitHub CI 是否转绿：未 push，无法验证。** 须推送后由 `gh run watch` 收口。
-- **`Check migration drift` 仍将首次真正执行**（此前每轮都被 security 挡在前面）。
-  已用 `git worktree add` 建 **`828f68c` 的干净快照**预演（避开 boss 未提交的
+- **`Check migration drift` 的本地预演与 CI 结论一致**（已实测，非推断）：
+  用 `git worktree add` 建 **`828f68c` 的干净快照**预演（避开 boss 未提交的
   `10_cf_tunnel_domains.sql` 与改过的 `generate-migrations.mjs` 污染）：
   `Generated 10 Supabase migrations`（EXIT=0）+ `git diff --exit-code -- supabase/
   worker/src/generated/` **EXIT=0**；再加 `-c core.autocrlf=false` 模拟 Linux 语义复验，
-  仍 EXIT=0，且生成物为纯 LF。
+  仍 EXIT=0，且生成物为纯 LF。CI 上该步 `Generated 10 Supabase migrations` 后 git diff 为空，通过。
   补充说明：本地 `git status` 会把 `supabase-migrations.ts` 显示为 `M`，
   那是 `core.autocrlf=true` 的行尾假象 —— 归一化后 diff 为空，CI 上不会出现。
-- **`Agent data race check` 本地无法执行，只能靠真实 CI**。实测原因是环境缺 C 编译器，
+- **`Agent data race check` 本地无法执行，已由 CI 收口 ✅**。本地实测原因是环境缺 C 编译器，
   与代码无关：
   ```
   $ CGO_ENABLED=1 go test -race -run '^$' ./...
   cgo: C compiler "gcc" not found: exec: "gcc": executable file not found in %PATH%
   FAIL  github.com/cf-vps-monitor/agent [build failed]
   ```
-  本地只验证了无 `-race` 的 `go build` / `go vet` / `go test`（见下）。
-  该步骤在 CI 的 `ubuntu-latest` 上才具备 CGO 条件，本轮为其首次以 go 1.26.10 运行。
+  本地退而验证了无 `-race` 的 `go build` / `go vet` / `go test`（全绿）。
+  **CI 的 `ubuntu-latest` 上该步已通过：`ok github.com/cf-vps-monitor/agent 30.004s`**，
+  这是 go 1.26.10 下首次带 `-race` 的真实执行结果。
 - **一处理论性残留 fail-open（rev4 发现，未修，已知且当前不可达）**：
   `collectAdvisories` 只对**对象型** `via` 做 unmapped 判定；**字符串型** `via`
   （语义是"漏洞属于上游那个包"）会被直接跳过，且不校验该包是否真在报告里。
