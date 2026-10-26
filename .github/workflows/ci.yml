@@ -113,6 +113,29 @@ jobs:
           CGO_ENABLED: '1'
         run: go test -race ./...
 
+      # ── 依赖安全扫描（阻断，但基于显式基线）──────────────────────────────
+      # 本仓从上游 kadidalax/cf-vps-monitor v2.0.3 继承了若干依赖漏洞
+      # （移植期提交从未改动 package.json / package-lock.json / go.mod / go.sum，
+      #  可用 git log 核对）。origin 版本要求 audit total === 0，于是整条流水线
+      # 长期卡在这一步，连后面的 `Check migration drift` 都从未真正执行过。
+      #
+      # 处理方式不是 continue-on-error（那会把新增漏洞一起放行），而是
+      # `scripts/security-baseline.json` 的**显式基线**：
+      #   · 基线内列出的 advisory → 放行，并在日志里逐条列出；
+      #   · 出现任何**新** advisory → 照常失败，阻断流水线与 Agent 发布；
+      #   · 基线条目已被修复 → 日志提示清理，不静默失效。
+      # 因此本步骤仍然是硬门禁，`release-agent.yml` 通过 `uses: ./ci.yml`
+      # 复用它的结论也依然成立。
+      #
+      # 已修复（10 → 4 条根因）：undici 7.30.1 / sharp 0.35.5 /
+      #   source-map-js 1.2.2 / hono 4.13.14。
+      #   注意 miniflare 与 wrangler 没有自身漏洞，只是依赖了上面两个才被标记，
+      #   故未升级它们 —— 升 wrangler 会改变 `wrangler types` 的口径，
+      #   反而会打破 Lint 步骤的约定。
+      # 仍留在基线里的 4 条及原因见 scripts/security-baseline.json 的 blockedBy 字段。
+      #
+      # 本地复查（npmmirror 不支持 audit 端点，必须显式指定官方 registry）：
+      #   npm audit --include=dev --registry=https://registry.npmjs.org
       - name: Dependency and toolchain security
         run: npm run security:check
 

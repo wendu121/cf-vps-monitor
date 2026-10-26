@@ -1,0 +1,74 @@
+{
+  "$schema-comment": "依赖漏洞基线：只放行此处列出的 advisory ID，任何新增 advisory 仍会被 security-check 阻断。",
+  "$why": [
+    "本仓从上游 kadidalax/cf-vps-monitor v2.0.3 继承了 10 条依赖漏洞（可用 git log 核对：",
+    "移植期间的提交从未改动 package.json / package-lock.json / go.mod / go.sum）。",
+    "origin 项目的 npm audit 要求 total === 0，因此这些继承漏洞会让整条 CI 长期卡死，",
+    "连后置的 Check migration drift 步骤都从未真正执行过。",
+    "与其用 continue-on-error 把整道门禁关掉（那样新增漏洞也不会被拦），",
+    "这里改为「显式基线 + 只拦增量」：已知项记录在案、可审计、有修复路径，未知项照常阻断。"
+  ],
+  "$maintenance": [
+    "修复任一 advisory 后，请把它从下方数组里删掉；security-check 会对已失效条目发出提示。",
+    "不要为了『让 CI 变绿』往这里加新 ID —— 这个文件只接受『上游继承、且已评估过风险』的条目。",
+    "本地复查（.npmrc 指向的 npmmirror 不支持 audit 端点，必须显式指定官方 registry）：",
+    "  npm audit --include=dev --registry=https://registry.npmjs.org"
+  ],
+  "npmAdvisories": [
+    {
+      "id": "GHSA-rj75-hqrm-r3gf",
+      "package": "postcss-selector-parser",
+      "severity": "moderate",
+      "title": "PostCSS: Quadratic complexity in flat selector parsing allows CPU exhaustion",
+      "blockedBy": "tailwindcss@3.4.19 硬绑 postcss-selector-parser ^6.1.2，修复线在 7.1.6；只能升 tailwindcss 4（major）。overrides 强制 7.x 在本 workspace 实测不生效。",
+      "exposure": "构建期工具链，不进入运行时产物；需要恶意构造的 CSS 选择器，且仅消耗 CPU。",
+      "followUp": "评估 tailwindcss 3 → 4 迁移后再删除本条目。"
+    },
+    {
+      "id": "GHSA-698v-4r3x-3vcv",
+      "package": "vite",
+      "severity": "moderate",
+      "title": "launch-editor: escapeCmdArgs() omits % escaping on Windows",
+      "blockedBy": "修复版 vite 8.1.6 存在，但本仓 npm 对 frontend workspace 的 vite 版本变更无响应（详见 VERIFICATION.md『8 次尝试』）；需删除 frontend/node_modules 重装。",
+      "exposure": "仅本地 dev server（launch-editor 打开编辑器）。生产为 Cloudflare Workers + 静态构建产物，不运行 vite dev。",
+      "followUp": "删除 frontend/node_modules 后重装 vite@8.1.6，然后删除本条。"
+    },
+    {
+      "id": "GHSA-r825-w8mm-5pxw",
+      "package": "vite",
+      "severity": "moderate",
+      "title": "launch-editor: Editor CLI flag misinterpretation causing arbitrary command execution for some editors",
+      "blockedBy": "同上（vite 8.1.6 无法在本 workspace 安装）。",
+      "exposure": "同上，仅本地 dev server 场景。",
+      "followUp": "同上。"
+    },
+    {
+      "id": "GHSA-587h-7wmj-h5pm",
+      "package": "vite",
+      "severity": "high",
+      "title": "launch-editor: fs.existsSync() existence check can be bypassed on Windows",
+      "blockedBy": "同上（vite 8.1.6 无法在本 workspace 安装）。",
+      "exposure": "同上，仅本地 dev server 场景；需攻击者能在本机触发编辑器启动参数。",
+      "followUp": "同上；这是基线里唯一的高危项，优先处理。"
+    },
+    {
+      "id": "GHSA-9jrq-w75r-8gcw",
+      "package": "vite",
+      "severity": "low",
+      "title": "Vite: Cross origin script execution through Vite custom middleware",
+      "blockedBy": "同上（vite 8.1.6 无法在本 workspace 安装）。",
+      "exposure": "同上，仅本地 dev server 场景。",
+      "followUp": "同上。"
+    },
+    {
+      "id": "GHSA-rq7h-c2jc-7f22",
+      "package": "vite",
+      "severity": "moderate",
+      "title": "Vite: Files outside server.fs.allow could be served when project paths match system paths on non-Windows machine",
+      "blockedBy": "同上（vite 8.1.6 无法在本 workspace 安装）。",
+      "exposure": "同上；且仅在非 Windows 机器 + 路径匹配时才成立。",
+      "followUp": "同上。"
+    }
+  ],
+  "goVulnerabilities": []
+}

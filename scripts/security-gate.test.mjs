@@ -13,7 +13,7 @@ const vulnerableNpm = { status: 1, stdout: JSON.stringify({ auditReportVersion: 
 
 // Traverse the actual checked-in verification entrypoints. Builds and behavior
 // tests pass in this fixture so only the scanner boundary can block publication.
-async function fixture({ npm = cleanNpm, go = cleanGo, commands = ['npm run verify'] } = {}) {
+async function fixture({ npm = cleanNpm, go = cleanGo, commands = ['npm run verify'], baselinePath } = {}) {
   const calls = [];
   const run = (command, args, options) => {
     calls.push({ command, args, options });
@@ -34,7 +34,7 @@ async function fixture({ npm = cleanNpm, go = cleanGo, commands = ['npm run veri
       const nodeStep = /^node (\S+\.mjs)$/.exec(step.trim());
       assert.ok(nodeStep, `fixture must execute the actual supported command: ${step}`);
       const module = await import(new URL(nodeStep[1], root));
-      await module.runSecurityChecks({ run, log() {} });
+      await module.runSecurityChecks({ run, log() {}, ...(baselinePath ? { baselinePath } : {}) });
     }
   }
   try {
@@ -132,4 +132,112 @@ test('AUD-20 the reusable CI gate blocks same-checkout Agent publishing when sec
   const success = await fixture({ commands });
   assert.equal(success.status, 0, success.error?.stack);
   assert.equal(success.calls.length, 2);
+});
+
+// ── 显式基线（scripts/security-baseline.json）───────────────────────────────
+// 门禁之所以能在「上游继承漏洞」存在时仍然转绿，是因为放行是**逐 advisory 白名单**，
+// 而不是把整道门禁关掉。以下测试锁住这个性质：基线内的放行、基线外的照常阻断、
+// 基线丢失时 fail closed。
+
+function advisoryReport(entries) {
+  const vulnerabilities = {};
+  for (const entry of entries) {
+    vulnerabilities[entry.package] = {
+      severity: entry.severity ?? 'moderate',
+      range: '*',
+      via: [{
+        source: 1, name: entry.package, dependency: entry.package,
+        title: entry.title ?? 'synthetic', url: `https://github.com/advisories/${entry.id}`,
+        severity: entry.severity ?? 'moderate', range: '*',
+      }],
+    };
+  }
+  const total = entries.length;
+  return {
+    status: 1,
+    stdout: JSON.stringify({
+      auditReportVersion: 2,
+      vulnerabilities,
+      metadata: { vulnerabilities: { info: 0, low: 0, moderate: total, high: 0, critical: 0, total } },
+    }),
+    stderr: '',
+  };
+}
+
+const baseline = JSON.parse(await readFile(new URL('scripts/security-baseline.json', root), 'utf8'));
+
+test('AUD-20 advisories listed in the baseline are allowed through without downgrading the gate', async () => {
+  assert.ok(baseline.npmAdvisories.length > 0, 'the checked-in baseline documents the inherited findings');
+  const entries = baseline.npmAdvisories.map(item => ({ package: item.package, id: item.id, severity: item.severity }));
+  const result = await fixture({ npm: advisoryReport(entries) });
+  assert.equal(result.status, 0, result.error?.stack);
+  assert.ok(result.calls.some(call => call.args.includes('audit')));
+});
+
+test('AUD-20 an advisory missing from the baseline still blocks even when other findings are baselined', async () => {
+  const known = baseline.npmAdvisories[0];
+  const result = await fixture({
+    npm: advisoryReport([
+      { package: known.package, id: known.id, severity: known.severity },
+      { package: 'brand-new-pkg', id: 'GHSA-aaaa-bbbb-cccc', severity: 'high' },
+    ]),
+  });
+  assert.equal(result.status, 1, 'a newly disclosed advisory must not ride along with baselined ones');
+  assert.match(result.error.message, /GHSA-aaaa-bbbb-cccc/);
+});
+
+test('AUD-20 a missing or malformed baseline fails closed instead of silently allowing findings', async () => {
+  const cases = [
+    { baselinePath: new URL('scripts/security-baseline.does-not-exist.json', root).pathname },
+    { baselinePath: new URL('scripts/security-gate.test.mjs', root).pathname },
+  ];
+  for (const options of cases) {
+    const result = await fixture({ npm: advisoryReport([]), ...options });
+    assert.equal(result.status, 1, 'the gate must not pass without a readable baseline');
+  }
+});
+
+test('AUD-20 the reusable CI gate keeps security as a hard step, not continue-on-error', async () => {
+  const ci = await readFile(new URL('.github/workflows/ci.yml', root), 'utf8');
+  const blocks = ci.split(/^ {6}- name: /m).slice(1);
+  const security = blocks.find(block => block.startsWith('Dependency and toolchain security'));
+  assert.ok(security, 'the CI security step must exist');
+  assert.match(security.split(/^ {6}- name: /m)[0], /run: npm run security:check/);
+  assert.doesNotMatch(
+    security.split(/^ {6}- name: /m)[0],
+    /continue-on-error/,
+    'security must stay blocking: a non-blocking step would also let brand-new advisories through, '
+    + 'and release-agent.yml reuses this workflow as its only pre-publish gate',
+  );
+});
+
+test('AUD-20 a baselined advisory whose severity was raised must be re-reviewed, not silently allowed', async () => {
+  const known = baseline.npmAdvisories.find(item => item.severity !== 'critical');
+  assert.ok(known, 'the baseline carries at least one non-critical entry');
+  const result = await fixture({
+    npm: advisoryReport([{ package: known.package, id: known.id, severity: 'critical' }]),
+  });
+  assert.equal(result.status, 1, 'an advisory escalated to critical invalidates the accepted-risk record');
+  assert.match(result.error.message, /raised the severity/);
+});
+
+test('AUD-20 a report claiming findings but yielding no advisory id fails closed', async () => {
+  const unparseable = {
+    status: 1,
+    stdout: JSON.stringify({
+      auditReportVersion: 2,
+      // `via` only names an upstream package: nothing here maps to an advisory id.
+      vulnerabilities: { leaf: { severity: 'high', range: '*', via: ['upstream-package'] } },
+      metadata: { vulnerabilities: { info: 0, low: 0, moderate: 0, high: 1, critical: 0, total: 1 } },
+    }),
+    stderr: '',
+  };
+  const result = await fixture({ npm: unparseable });
+  assert.equal(result.status, 1, 'an unparseable report must not be treated as clean');
+  assert.match(result.error.message, /none could be mapped to an advisory id/);
+});
+
+test('AUD-20 govulncheck exiting non-zero with a clean line is still a contradiction', async () => {
+  const result = await fixture({ go: { status: 3, stdout: 'No vulnerabilities found.\n', stderr: '' } });
+  assert.equal(result.status, 1, 'exit 3 means findings, so a clean line contradicts it');
 });
