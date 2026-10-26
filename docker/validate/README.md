@@ -45,6 +45,24 @@ NO_PROXY=localhost,127.0.0.1 npx wrangler dev --local --var SUPABASE_URL=http://
 ```
 （wrangler dev 会同时托管前端静态资源与 /api 路由。）
 
+## 验证 admin 登录与会话
+上一步的 Worker 跑起来后，另开一个终端：
+```bash
+node docker/validate/verify-login.mjs
+```
+它依次打 `POST /api/login`、`GET /api/me`、`GET /api/admin/clients`
+（**后两个仅在登录成功、拿到 cookie 时才请求**，否则直接打印 `SKIPPED`），
+逐行打印 `HTTP <状态码>`、`setCookie=yes|no`，以及响应里出现的 `username` /
+`code` / 客户端条数（`clients=N`）。**不输出密码、token、cookie 的明文内容**。
+
+脚本把 `BASE` 硬编码为 `http://127.0.0.1:8787`，即 `wrangler dev` 的默认端口；
+如果你用 `--port` 改了端口，需同步改脚本里的 `BASE`，否则会静默连到别处或连不上。
+
+> 该脚本**不是单元测试**，请不要把它改名成 `test-*.mjs` 或 `*.test.mjs`，
+> 也不要挪进任何名为 `test/` 的目录：根级 `npm test` 是裸跑 `node --test`，
+> 它会按内置规则递归收录 `test-*.js`、`*.test.js`、`**/test/**/*.js` 等文件；
+> 一旦被收录，CI 会因为 `127.0.0.1:8787` 连不上而以 ECONNREFUSED 判红。
+
 ## 清理
 ```bash
 docker compose down -v   # 连同数据卷一起删除

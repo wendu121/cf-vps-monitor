@@ -1,136 +1,153 @@
-<!-- reviewed-by: independent-subagent (rev2: post-change) -->
-# 独立审议 (REVIEW) — CI Lint 修复（wrangler types --check 口径不一致）
+<!-- reviewed-by: independent-subagent -->
 
-> 审议方：独立 `general-purpose` 子代理（rev1 与 rev2 为不同实例，均未参与实现）。
-> 覆盖范围：`.github/workflows/ci.yml`（+26 行）、`VERIFICATION.md`。
-> 结论：**PASS**，阻断项 0。rev2 覆盖追加注释与两处措辞修正后的状态。
+# 独立审议 (REVIEW) — 修复 CI Test 失败（手工验证脚本被单测 glob 误收）
 
-## 改动摘要
+## 审议方与覆盖范围
 
-在 `Lint` 步骤之前新增 `Seed CI env bindings`：用 heredoc 写入只含 5 个键、值为
-`ci-placeholder` 的 `worker/.dev.vars`，使 CI 的 `wrangler types` 生成口径与已提交的
-`worker/worker-configuration.d.ts` 对齐。另有 16 行注释说明根因与两条防回归约束。
+- 审议方：独立子代理（reviewer-ci-test），**未参与本轮任何实现**，仅在本机仓库做只读核查 + 隔离实验 + 拉取 CI 日志，然后撰写本文件。未修改任何业务代码。
+- 覆盖范围：`docker/validate/` 的 rename 与两处文档/注释改动，以及 `VERIFICATION.md` 中的自审结论。
+- 核查环境：Windows 11 / git bash；本地 `node v22.22.2`；另用 `npx -y node@24` 取到 **v24.22.1** 复现 CI 版本（`ci.yml:29` 为 `node-version: '24'`）。
+- 时间点：`HEAD = 7ea0012`，工作区含本轮 3 项改动 + boss 的 CF Tunnel WIP（8 M + 2 ??）。
+
+---
+
+## 核实记录
+
+### 1. 根因是否成立 —— **证实**
+
+证据链三层，全部自证：
+
+**(a) 脚本确实是裸跑**
+
+- `package.json:15` → `"test:js": "node --test"`（无任何路径/glob 参数）
+- `package.json:17` → `"test": "npm run test:js && npm run test:go"`
+- `.github/workflows/ci.yml:78-79` → `- name: Test` / `run: npm test`
+
+**(b) Node 默认 glob 确实含 `test-*` 前缀规则**
+
+- Node v24 官方文档（`https://nodejs.org/docs/latest-v24.x/api/test.html`，"Running tests from the command line"）列出的默认模式为：
+  `**/*.test.?(c|m)js`、`**/*-test.?(c|m)js`、`**/*_test.?(c|m)js`、**`**/test-*.?(c|m)js`**、`**/test.?(c|m)js`、`**/test/**/*.?(c|m)js`（另有对应 `.ts/.mts/.cts` 版本，`.tsx` 不在其中）。
+- 自建隔离实验（`/tmp/nt24`，与 CI 同主版本的 node 24.22.1）：
+
+  ```
+  $ npx -y node@24 --test        # 目录: docker/validate/{test-login,verify-login}.mjs + test/helpers/helper.mjs
+  ✖ docker\validate\test-login.mjs (245.2851ms)     ← 被收录并因顶层 throw 判红
+  ✔ test\helpers\helper.mjs     (247.7544ms)
+  ℹ tests 2 / ℹ pass 1 / ℹ fail 1     EXIT=1
+  # 输出中 "verify-login" 出现 0 次
+  ```
+
+  同一实验在本地 node v22.22.2 下结论一致（`test-alpha.mjs`/`sub/test-beta.mjs`/`real.test.mjs` 被收，`verify-*` 全部不收）。
+
+**(c) CI 现场与推论吻合**
+
+`gh run view 40303900639 --repo wendu121/cf-vps-monitor`（headSha `7ea0012...`）实测步骤结论：
+
+```
+6 Seed CI env bindings: success   7 Lint: success   8 Build: success   9 Test: failure
+10 Installer service account permissions: skipped  11 Agent root collector: skipped
+12 Agent data race check: skipped  13 Dependency and toolchain security: skipped
+14 Check migration drift: skipped
+```
+
+`--log-failed` 中的关键行：
+
+```
+[cause]: Error: connect ECONNREFUSED 127.0.0.1:8787
+✖ docker/validate/test-login.mjs (58.427594ms)
+test at docker/validate/test-login.mjs:1:1
+ℹ tests 997 / ℹ pass 967 / ℹ fail 1 / ℹ skipped 29
+```
+
+与自审引用的数字、文件、错误完全一致。且该文件内**没有任何 `node:test` 导入或断言**（`grep -n "node:test|^test(|assert"` → 无命中），只是顶层 `await fetch(...)`（`verify-login.mjs:23`），所以它被执行 = 必然连 8787。根因判定成立：**命名撞上测试发现规则，不是脚本缺陷**。
+
+### 2. 改动范围 —— **证实（附一个提交流程提醒）**
+
+- 只看本次相关目录（HEAD → 工作区，含 staged + unstaged）：
+
+  ```
+  $ git diff HEAD --stat --find-renames -- docker/
+   docker/validate/README.md                            | 12 ++++++++++++
+   docker/validate/{test-login.mjs => verify-login.mjs} |  7 +++++++
+   2 files changed, 19 insertions(+)
+
+  $ git diff HEAD -M --summary -- docker/
+   rename docker/validate/{test-login.mjs => verify-login.mjs} (76%)
+  ```
+
+  → 净 `+19 / −0`，与 VERIFICATION.md 自述一致；rename 被 git 正确识别（76% 相似度，`R` 记录，磁盘上已无 `test-login.mjs`，`docker/validate/` 仅剩 `verify-login.mjs`）。
+
+- boss 的 WIP 未被混入：8 个 `M` 全在 `worker/`、`frontend/`、`scripts/`、`supabase` 相关路径，抽样 `worker/src/utils/cf-client.ts` 的 diff 是 `CfCustomDomain.via` / `CfDnsRecord` 的 CF 自定义域名与 DNS CNAME 补全，与 `docker/validate/` 无关；2 个 `??` 为 `supabase/migrations/10_cf_tunnel_domains.sql`、`worker/src/utils/cf-client.test.mjs`。本轮未触碰 `package.json`、`ci.yml`、任何 `worker/src` 或 `frontend/src`。
+
+- 需注意（非缺陷）：**rename 已进 index，但 `+7` 注释与 `README +12` 还在工作区**（`git status --short` 第 3 行是 `RM` 而非 `R `）。若用不带 `-a` 的 `git commit` 直接提交，会只提交 rename、丢掉两处内容改动。提交前请 `git add -A docker/validate VERIFICATION.md REVIEW.md`。
+
+- `VERIFICATION.md` 本身也被改写（162 行变动），属自审文档，不在「业务代码」范畴；但它与 `REVIEW.md` 会一起进 commit，故其事实性错误需要一并修（见下文）。
+
+### 3. 改名的有效性 —— **证实**
+
+- 逐条比对 Node 六条默认规则与 `verify-login.mjs`：不匹配 `.test.`、`-test.`、`_test.`、`test-*`、`test.js`、`test/` 目录——**一条都不命中**。
+- 实验反证（node 24.22.1）：把 `throw new Error("verify-login COLLECTED -- BAD")` 放进 `docker/validate/verify-login.mjs`，裸跑 `node --test` 后输出里 `verify-login` 出现 **0 次**，进程失败只来自同目录的 `test-login.mjs`。改名前后的行为差异是确定的，不是推断。
+- 该文件不落在任何 `test/` 目录下，因此也不会被 `**/test/**/*` 这条规则捞回。
+
+### 4. 是否会漏掉真测试 —— **「无真测试被漏」证实；但自审的「不存在第二个同类雷」被推翻**
+
+- 旧名引用面：全仓（不限扩展名、排除 `.git`/`node_modules`）`grep -rn "test-login"` 只命中 `verify-login.mjs:7` 一行注释和 `VERIFICATION.md` 自身的叙述，**代码/脚本/工作流零引用**；`grep -rn "docker/validate"` 也只命中 README 两行与历史 REVIEW 文档。因此改名不会让任何测试或 CI 步骤指向空路径。
+- 该文件本身不含测试（无 `node:test`、无断言），改名不会减少有效断言数。
+- **反证自审结论**：我按 Node 六条规则枚举全仓被 git 跟踪的文件，命中 **151 个**（rename 前为 152），其中**非** `*.test.*` 的并不止一个：
+
+  ```
+  命中文件总数: 151
+  按规则分布: { '*.test.*': 150, 'test/**': 20 }
+  非 *.test.* 命中的文件: [ 'frontend/test/helpers/production-module.mjs' ]
+  ```
+
+  `frontend/test/helpers/production-module.mjs` 是纯导出型 helper（`readProductionSource` / `productionModule` 等，无顶层副作用），它被 `**/test/**/*.mjs` 收进来，作为一个「0 断言的空测试」计 1 项并判 pass（我在 `/tmp/nt24/test/helpers/helper.mjs` 复现了这个现象：`✔ test\helpers\helper.mjs`，`tests 2`）。
+
+  性质说明：它今天**不是雷**（无网络、无抛错，CI 里也是绿的），但它是同一类「非测试文件被单测收录」的实例。任何人往这个 helper 顶层加一句 `await fetch(...)` 或 `throw`，CI 就会以同样方式判红，且报错信息会指向一个「看起来不是测试」的文件。因此 VERIFICATION.md:74-76 的「命中的 40 个文件中只有 … 不是真测试 / 不存在第二个同类雷」是**事实性错误**（数字错、结论也不完整）。
+
+### 5. 文档准确性 —— **基本证实，2 处小偏差**
+
+- 端口/路径一致：`verify-login.mjs:10` `const BASE = 'http://127.0.0.1:8787'`；README 警告里写的 `127.0.0.1:8787` 与之相符（wrangler dev 默认 8787，`worker/wrangler.toml` 无 `[dev]` 覆盖，故默认即成立）。
+- 请求序列一致：`verify-login.mjs:23-47` 依次 `POST /api/login` → `GET /api/me` → `GET /api/admin/clients`，README:53 的描述吻合。
+- 偏差 A（表述不精确）：README:54 写「只打印状态码与用户名」，实际还打印 `setCookie=yes/no`、`code=`、`clients=N`（`verify-login.mjs:20,46-47`）。虽不泄露任何明文凭据，但与「只」字不完全对应。
+- 偏差 B（覆盖不全）：README:56-58 只说默认 glob 会收录「`test-*.mjs`」，未提 `**/test/**/*` 这条同样会把非测试文件收进来的规则（正是第 4 条那个 helper 的成因）。对「怎么避免再踩」这个目标而言，提示是必要但不充分的。
+- 另：`/api/me`、`/api/admin/clients` 只在拿到 cookie 时才请求（`verify-login.mjs:32`），README 用「依次打」概括，读者可能误以为无条件三步。
+
+### 6. 披露完整性 —— **关键项诚实；3 处与实测冲突**
+
+- **「CI 是否转绿」：诚实标注为未验证**（VERIFICATION.md:86-87「未 push，无法验证 … 本文件不预先宣称 CI 会绿」）。这条是全文最该被检验的一条，写法合格，没有夸大。
+- 本地全量 `node --test` 未跑完、6 个后续步骤未实测、migration drift 预演被 WIP 污染（VERIFICATION.md:88-99）——**均属实且主动披露**。其中 drift 污染一项我核对过：`worker/src/generated/supabase-migrations.ts` 的 diff 确实插入了 `"version": "10_cf_tunnel_domains"` 且排在 `11_metric_availability` 之前，与自述一致。
+- 冲突 1：`VERIFICATION.md:75` 的「40 个文件」→ 实测 151（见第 4 条）。
+- 冲突 2：`VERIFICATION.md:20` 的「其余 6 步 skipped」→ 实测 Test 之后被跳过的工作流步骤是 **5 个**（`ci.yml` 的 83/88/110/116/119 行），另有 2 个 post 步骤（Post Setup Go / Post Setup Node）也是 skipped，凑不出 6。
+- 缺口 1：`npm test` 是 `test:js && test:go`，此前 `test:js` 就挂了，`test:go`（`cd agent && go test ./...`，19 个 `_test.go`）在 CI 里**从未真正执行过**。本轮修好 `test:js` 后它会首次运行，是「CI 转绿」的另一个未知面；披露段只提了 Lint 之后的 5 个独立步骤，没点名它。
+- 缺口 2：未提及 `test/` 目录规则与 `frontend/test/helpers/production-module.mjs`（见第 4 条）。
+
+---
 
 ## 阻断项
 
-无。
+**阻断项 0。**
 
-## rev1 非阻断建议与本轮处置
+代码侧改动（rename + 注释 + README）我找不到功能性缺陷：根因成立、改法直达根因、范围最小、rename 已被 git 正确识别、零引用残留、在 CI 同主版本 Node 上实验证明新名不再被收录。可以提交。
 
-| # | 建议 | 处置 |
-|---|---|---|
-| 1 | 自审头部「新增 1 step + 11 行注释」与实测不符 | 已改为「`+26` 行 = 16 行注释 + 1 个 step（9 行正文 + 1 个空行）」，rev2 复算一致 |
-| 2 | 「推送 `63ac544` 后 CI 首次真正运行」口径不准 | 已改成「`63ac544` 本身无 run；Actions 打开后在其上的探测提交 `55a297d0` 触发首次 run；该 ref 的 ci.yml blob 为 `ad620e803b7e`，与修复前 HEAD blob 相同」，rev2 用 `gh api` 复核两处 blob 一致 |
-| 3 | 后人可能「清理」掉 `SUPABASE_URL` 导致再红 | 已在注释里写死该约束 |
-| 4 | 建议注明 wrangler 无跳过 `.dev.vars` 的开关 | 已写入注释 |
-| 5 | `worker/.dev.vars.example` 只列 2 键，与 5 键不一致 | **未采纳（本轮）**：属另一个文件的文档同步，留作待办 |
-| 6 | 三种替代方案评估 | 采纳其结论：保留现方案。理由见下 |
+（`VERIFICATION.md` 的两处数字/结论错误列在下面第 1、2 条。它们不影响 CI 结果，但会和本 REVIEW 一起进同一个 commit，建议同批改掉，否则 commit 内自带矛盾证据。）
 
-### 替代方案评估（rev1 实测结论，未采纳）
+---
 
-- **(i) 重新生成并提交 `worker-configuration.d.ts` 使其等于 CI 口径**：技术上可行，
-  rev1 实测换成该口径后 `tsc --noEmit` 仍 **0 error**（密钥访问走 `JwtEnv` 等结构化局部类型，
-  不依赖全局 `Env`）。但代价是 Env 契约里丢掉 5 个 secret 的文档性，且本地有 `.dev.vars`
-  时同样会红，收益仅为「CI 少一个 step」，不划算。
-- **(ii) 给 `wrangler types` 加 flag 忽略 dev vars**：wrangler 4.116.0 **无此开关**
-  （`--help` 全量列出：`--env / --env-file / --env-interface / --include-runtime /
-  --include-env / --strict-vars / --check`，`--env-file` 只能追加文件）→ 不可行。
-- **(iii) 从 lint 拿掉 `wrangler types --check`**：会丢掉「声明文件与配置漂移」这道闸，
-  而 B3 这类大改最容易踩，**不建议**。
+## 非阻断建议
 
-## rev1 实际执行过的核查
+1. **`VERIFICATION.md:74-76` 必须改述**（现为事实性错误）。建议替换为：
+   > 用 `git ls-files` 按 Node 六条默认规则枚举全仓：命中 **151 个**（rename 前 152），其中 150 个是 `*.test.mjs` 真测试；**唯一**非 `*.test.*` 的命中是 `frontend/test/helpers/production-module.mjs`（被 `**/test/**/*.mjs` 收录，纯导出 helper，今天 0 断言空跑且判 pass，不构成当前雷，但同类风险仍在）。
+2. **`VERIFICATION.md:20` 的「其余 6 步」→ 改为「其余 5 步 + 2 个 post 步骤」**，与 `gh run view` 实测一致。
+3. **提交前 `git add -A docker/validate VERIFICATION.md REVIEW.md`**：rename 已在 index，`+7` 注释与 `README +12` 仍只在工作区，直接 `git commit` 会漏掉后者（`git status` 显示 `RM`）。
+4. **在披露段点名 `test:go`**：`npm test` 后半段 `cd agent && go test ./...` 在 CI 中从未执行，推送后是新的未知面；建议写明「若 Test 步骤仍红，优先看 test:go 段」。
+5. **README:54 精确化**：改成「只打印 HTTP 状态码、`setCookie` 有无、用户名 / 业务 `code` / clients 数量，不输出密码、token、cookie 明文」，并把「依次打三步」补一句「未拿到 cookie 时 `/api/me`、`/api/admin/clients` 会被跳过」。
+6. **README:56-58 的警告补一条规则**：除 `test-*.mjs` / `*.test.mjs` 外，`test/` 目录下的任意 `.mjs` 也会被收录（当前 `frontend/test/helpers/production-module.mjs` 即此类）。
+7. **处置 helper（择一，可后续单独做）**：把 `frontend/test/helpers/` 移出 `test/`（如 `frontend/testing/helpers/`），或在该文件头加一行「被单测 glob 收录，勿加顶层副作用」。不阻断本轮。
+8. **可选**：`docker/validate/README.md:49-51` 明确写出端口（`wrangler dev` 默认 8787，脚本 `BASE` 硬编码 8787），避免有人用 `--port` 改了端口后脚本静默连错。
 
-### 三组对照（先备份真实 `worker/.dev.vars`，全程未打印任何值；实验后 md5 与备份一致并还原；每个实验后 `git checkout -- worker/worker-configuration.d.ts`）
+---
 
-| 条件 | `wrangler types` 生成结果 | md5 / 与 HEAD 比 | `--check` |
-|---|---|---|---|
-| a) 无 `.dev.vars` | 仅 `SUPABASE_URL: "https://PROJECT_REF.supabase.co"`（字面量）+ 2 个 DO 命名空间 | `94b70778…` ≠ HEAD `50efcfc8…` | **EXIT=1**（修复前必红的根因确认） |
-| b) 5 键占位 | 5 个 `string` 键 | `50efcfc8…` **== HEAD blob** | **EXIT=0** `up to date` |
-| c) 6 键（boss 本机真实） | 多一个 `SUPABASE_ACCESS_TOKEN` | ≠ HEAD | **EXIT=1** |
+## 结论
 
-附加发现：
-
-- **生成物只与键集有关、与值无关**——把 5 个值全换成 `x`，md5 仍一致。这意味着「少一个键」必崩。
-- **CRLF 陷阱**：`git checkout` 还原后工作区 d.ts 为 CRLF（14720 个 CR）时 `--check` 假失败 EXIT=1；
-  换成 LF 后同一命令 EXIT=0。CI 在 ubuntu 上检出 LF，不受影响。
-- 把 `frontend/dist` 临时移走（模拟 CI 在 Lint 阶段尚无 dist）后 `--check` 仍 `up to date` EXIT=0
-  → `[assets]` 缺失不影响 `wrangler types`。
-- 端到端：占位 `.dev.vars` + LF 的 d.ts 下 `cd worker && npm run lint` **EXIT=0**，`tsc` 无输出。
-
-### YAML 真实解析（非肉眼）
-
-临时 `pip install --target /tmp/pylibs pyyaml`（不碰全局、不改仓库），`yaml.safe_load` 成功；
-`jobs.verify.steps` 13 个，顺序 `… Install dependencies → Seed CI env bindings → Lint …`；
-取出的 `run` 与期望脚本 `==` 判定 True，逐行列号全为 0、`EOF` 在列 0（`run: |` 列 8、内容列 10）。
-该 step 的键只有 `['name','run']`。另把脚本落到临时沙箱 `bash` 执行 → EXIT=0，
-产物正是 5 行 `KEY=ci-placeholder`、LF 结尾。
-
-### 范围与副作用
-
-- `git diff -- .github/workflows/ci.yml`：单个 hunk，`+17 −0`（rev1 时点），只在 Lint 前插入；
-  顶层 `on/permissions/concurrency` 未在 diff 中。
-- `scripts/security-check.mjs` 全文 60 行只有 `npm audit` + `govulncheck`，**没有任何
-  git status / untracked 检查**；ci.yml 末尾 `git diff --exit-code` 只比 `supabase/` 与
-  `worker/src/generated/`。且 `git check-ignore -v worker/.dev.vars` → `.gitignore:17:.dev.vars*`，
-  该文件即使存在也不会出现在 status 里（实测生效）。
-- `npm ci` 不依赖 `.dev.vars`；`npm run build` 的 worker 段同样含 `wrangler types --check`，
-  因此这一步**同样被修好**；`generate-migrations.mjs` 不读 `.dev.vars`（全仓 grep 只命中 ci.yml 与注释）。
-- `npm test` 不受影响：miniflare 夹具用 `new Miniflare({ bindings: runtimeSecrets, … })` 显式注入，
-  构造器不会自动读 `.dev.vars`。
-- 键清单比对：`worker-configuration.d.ts` 的 `__BaseEnv_Env` 恰好 5 个字符串键 + 2 个 DO 命名空间，
-  `ProcessEnv` 的 `Pick<…>` 同 5 个 → 种子**不多不少正好 5 个，顺序一致**。
-- `package-lock.json` 只有一份 hoisted `wrangler@4.116.0`（root 无 wrangler 依赖，
-  workspaces = frontend/worker）→ CI 与本地同源、可复现。
-
-### 自审真实性
-
-8 条「已验证」逐条对得上（第 1 条 `gh run view 40299541754 --repo wendu121/cf-vps-monitor
---log-failed` 由审议方亲自跑过，失败步骤 = `Lint`，日志尾部为
-`✘ [ERROR] Types at worker-configuration.d.ts are out of date…` + `exit code 1`）。
-如实披露到位：明确写「未在 GitHub 上真实验证该修复」「本地是模拟 CI 通过」，
-并主动写了「本地 Windows 的 `npm run lint` 仍会失败（CRLF + 第 6 个键）」。
-
-## rev2 增量复核（追加注释 + 两处措辞修正后）
-
-**1. YAML 仍合法、脚本字节未变**：PyYAML 解析成功，`steps` 13 个，
-`steps[4]` = `Seed CI env bindings`，键仍为 `['name','run']`；`run` 值与期望**逐字节相等**
-（181 字符），`EOF` 在列 0、结尾单个 `\n`、无 CRLF；位置 3 < 4 < 5
-（`Install dependencies` 之后、`Lint` 之前）。
-
-**2. 数字复算**：`git diff --stat` → `1 file changed, 26 insertions(+)`；`--numstat` → `26 / 0`
-（0 删除）。分类：`#` 注释 **16** 行，其余 **10** 行（`- name:` / `run: |` / `cat` / 5 键 / `EOF` / 1 空行）
-= 9 行正文 + 1 空行 → 与 VERIFICATION.md 表述完全对得上。
-
-**3. blob 口径**：`git rev-parse HEAD:.github/workflows/ci.yml` 与
-`gh api contents/.github/workflows/ci.yml?ref=55a297d0 --jq .sha` 均为
-`ad620e803b7e4fc24197a9f8bf75dfa5bb994453` → 「`55a297d0` 的失败结论适用于本修复」成立。
-
-**4. 改动范围**：`git status --short` 10 个 `M` + 2 个 `??`，本轮相关仅 `ci.yml` 与
-`VERIFICATION.md`；其余 8 个 M + 2 个 `??` 确为 boss 的 CF Tunnel WIP，未被动。
-ci.yml diff 仅 1 个 hunk、0 删除行 → 无从改到 `on`/`permissions`/`concurrency`。
-
-**rev2 结论**：`PASS`，阻断项 0。
-
-## 未复核项（两轮合并）
-
-- **真实 GitHub CI 是否转绿**：两轮审议期间均未 push，无法验证。这条只能由推送后
-  `gh run watch` 收口，是本次修复唯一算数的证据。
-- **Lint 之后的步骤**：`build`（vite + build:migrations）、`npm test`（全仓 `node --test`
-  + `go test`）、两个 `sudo` 权限步骤、`security:check`、`Check migration drift`
-  在 CI 上的表现均未实测。
-- **Actions 官方 schema 级校验**：环境无 actionlint，用 PyYAML 解析 + 沙箱真实执行，
-  能证明缩进剥离与 shell 语义正确，但不等价于 GitHub 的 workflow schema 校验。
-- **根目录完整 `npm run lint` 的 frontend 段**未重跑（`CFAssets.tsx` 是 boss WIP，
-  跑出来不代表本轮）；作为替代，从 CI 失败日志确认 frontend 的 `tsc -p tsconfig.json --noEmit`
-  在修复前就是通过的。
-- **boss 的 CF Tunnel WIP 本身**（8 M + 2 ??）正确性不在本轮范围，未审。
-- **非 Ubuntu runner / macOS 行为**未验证（workflow 仅配 `ubuntu-latest`，实际风险为零）。
-
-## 遗留待办（非阻断）
-
-- `worker/.dev.vars.example` 只列 `SUPABASE_SECRET_KEY` / `JWT_SECRET` 两键，与已提交
-  d.ts 的 5 键不一致。建议补一句「增删键必须同步修改 ci.yml 的 `Seed CI env bindings`
-  并重新生成 `worker-configuration.d.ts`」。
-- 本地 Windows 的 `npm run lint` 仍会因 CRLF + 第 6 个键（`SUPABASE_ACCESS_TOKEN`）失败。
-  若想让本地也绿，可考虑给 `.gitattributes` 加 `worker/worker-configuration.d.ts text eol=lf`
-  并从本地 `.dev.vars` 摘掉多余键；属本地开发体验问题，不在本轮目标内。
+**PASS** —— 根因（裸跑 `node --test` 的默认 glob 收录 `test-*.mjs`）已在 CI 同主版本 Node 上被独立实验证实，改名确实让脚本脱离收录范围，改动范围最小且未混入 WIP；仅 `VERIFICATION.md` 有两处数字/结论需在提交前改述，不影响 CI 结果。
