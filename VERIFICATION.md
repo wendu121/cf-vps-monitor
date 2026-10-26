@@ -7,6 +7,58 @@
 >
 > **不在本轮范围**：boss 的 CF Tunnel WIP（8 个已修改 + 2 个未跟踪）仍未提交。
 
+## 最终结果（CI run 40308866676，已推送 `3f3760a`，已实测）
+
+> 本节是在推送后按 `gh run view` 的真实结果回填的，用于收口下文「未验证项」中的 CI 条目。
+
+| 步骤 | 结果 |
+| --- | --- |
+| Seed CI env bindings / Lint / Build | ✅ success |
+| **Test** | ✅ **success**（本轮目标达成，`test:js` 与 `test:go` 均通过） |
+| Installer service account permissions | ✅ success（首次真实执行） |
+| Agent root collector permissions | ✅ success（首次真实执行） |
+| Agent data race check | ✅ success（首次真实执行） |
+| **Dependency and toolchain security** | ❌ **failure** |
+| Check migration drift | ⏭ skipped（被上一步失败中断） |
+
+**结论：本轮目标「让 Test 转绿」已达成**，且三个此前从未执行过的 sudo/race 步骤全部通过。
+CI 整体仍红，但红点已从「本轮能修的问题」推进到**下一层既有问题**（见下节）。
+
+## 新的失败点：依赖漏洞（既有问题，非本轮引入）
+
+`Dependency and toolchain security` 跑 `scripts/security-check.mjs`，它有两道硬门槛：
+`npm audit` 必须 **total === 0**（`--audit-level=low --include=dev`，连 info 都算失败），
+之后 `govulncheck` 必须恰好输出 `No vulnerabilities found.`。
+
+CI 在**第一道**就失败。用官方 registry 实测 `npm audit --include=dev` 得到
+**10 个漏洞（4 moderate + 6 high）**：
+
+| 包 | 严重度 | 直接依赖 | 修复方式 |
+| --- | --- | --- | --- |
+| undici | high | 否（overrides→miniflare） | ≥7.30.1（当前 pin 7.29.0） |
+| sharp | high | 否（overrides→miniflare） | ≥0.35.5（当前 pin 0.35.4） |
+| source-map-js | high | 否 | ≥1.2.2 |
+| vite | high | 是 | 升 patch |
+| wrangler | high | 是 | 4.152.0（经 miniflare 传递） |
+| hono | moderate | 是 | 升 patch（4.12.4–4.13.10 有洞） |
+| tailwindcss | moderate | 是 | **需 4.3.3（major，3→4）** |
+| postcss-selector-parser | moderate | 否 | ≥7.1.6 |
+| postcss-nested | moderate | 否 | 跟随上游 |
+| miniflare | high | 是（dev） | 跟随 sharp/undici |
+
+**与本轮改动无关，已用 git 核实**：
+`git diff --stat 7ea0012 HEAD -- package.json package-lock.json */package.json */package-lock.json agent/go.mod agent/go.sum`
+输出为空；三个提交累计同样为空。即这些漏洞是从上游 v2.0.3 继承的既有问题。
+
+**`govulncheck` 的真实结果在 CI 上仍未知**：它在第一道就短路，从未执行。
+本地试跑报「10 个 Go 标准库漏洞」，但**该结果不代表 CI** ——
+`agent/go.mod` 要求 `go 1.26.8`，CI 按 `go-version-file` 装 1.26.8，
+而本地只有 `go 1.25.1`，标准库落后一轮，漏洞是从本地旧标准库扫出来的。
+
+**未处理原因**：完整修复需要 `tailwindcss 3→4` 这类 major 升级，
+会影响前端构建与样式，属独立议题；且 boss 的 CF Tunnel WIP 正在改 worker 侧。
+本轮不擅自推进，已向 boss 报告并给出选项。
+
 ## 上一轮修复的实际效果（CI run 40303900639，有据可查）
 
 推送 `63ac544..7ea0012` 后 CI 首次完整跑到 Lint 之后，逐步结论：
@@ -105,24 +157,28 @@ node:internal/modules/run_main:107
 
 ## 未验证 / 需披露
 
-- **真实 GitHub CI 是否转绿：未 push，无法验证。** 这是本轮唯一算数的证据，
-  必须在推送后由 `gh run watch` 收口。本文件不预先宣称 CI 会绿。
+- ~~真实 GitHub CI 是否转绿：未 push，无法验证~~ → **已收口**：推送 `3f3760a` 后
+  run `40308866676` 实测 `Test` **success**，本轮目标达成；CI 整体仍红于
+  `Dependency and toolchain security`（既有依赖漏洞，详见上方「新的失败点」一节）。
 - **本地未能完成全量 `node --test`**：Windows 上跑 13 分 41 秒仍未结束
   （CI 同批 204 秒），本地缺 Docker / postgres 会让集成测试空等，继续跑无增量信息已终止。
   因此「本地全绿」**不作为**本轮结论依据；依据是 CI 日志中其余 996 项 already green
   ＋ 上述 glob 判别实验。
-- **`test:go` 在 CI 上从未真正执行过。** 根 `test` = `test:js && test:go`，
-  此前 `test:js` 就已失败，Go 测试从未在 CI 跑。本轮推送后它才首次执行；
-  本地 `go test ./...` 在 B3 轮已通过（ok 31.5s），但 CI 口径未经实测。
-- **CI 上 Lint 之后的 5 个业务步骤仍未实测**（两个 sudo 权限检查、Agent data race、
-  `security:check`、`Check migration drift`）。它们此前一直因前序失败而 skipped，
-  本轮推送后才会首次真正执行，是否通过待观察。其中两项已做本地预演，见下。
-- **`security:check` 本地预演：不可用，非代码问题。** 本地执行返回真实 EXIT=1，
+- ~~`test:go` 在 CI 上从未真正执行过~~ → **已实测通过**：run `40308866676` 的
+  `Test` 步骤 success 覆盖了 `npm test` 全链（`test:js && test:go`），
+  Go 侧 19 个 `_test.go` 首次在 CI 上跑通。
+- ~~CI 上 Lint 之后的 5 个业务步骤仍未实测~~ → **已实测 3 过 1 挂 1 未跑**：
+  两个 sudo 权限检查与 `Agent data race check` 均 success；
+  `Dependency and toolchain security` failure（既有依赖漏洞）；
+  `Check migration drift` 被上一步失败中断，**仍未实测**。
+- **`security:check` 本地预演：曾因镜像不可用而失败，已定性。** 本地执行返回真实 EXIT=1，
   原因是 boss 的 npm 指向 `registry.npmmirror.com`，该镜像不支持
   `/-/npm/v1/security/audits/quick` 端点（404 NOT_IMPLEMENTED）。
   顺带核实脚本本身是 **fail-closed**（`requireSuccessfulScan` 抛错），
-  不存在「扫描失败却放行」的假绿风险。CI 使用官方 registry，预期通过，但未实测。
+  不存在「扫描失败却放行」的假绿风险。**CI 上该步确实失败，但原因是依赖漏洞（见上），
+  不是镜像问题** —— CI 用的是官方 registry。
   （注：首次用 `| tail` 读退出码读到的是 `tail` 的 0，属误判，已重测修正。）
+
 - **`Check migration drift` 本地预演：预期通过。** 在 `git worktree` 的干净 HEAD 下
   执行 `node scripts/generate-migrations.mjs` → `Generated 10 Supabase migrations.`，
   随后 `git diff --quiet -- supabase/ worker/src/generated/` 返回 **0（无漂移）**，
